@@ -1,26 +1,40 @@
 import os
 import base64
-import httpx
 from email.mime.text import MIMEText
-from fastapi import FastAPI
-from fastapi.responses import RedirectResponse
+from urllib.parse import quote
+
+import httpx
 from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import RedirectResponse
 
 load_dotenv()
 
-app = FastAPI()
+app = FastAPI(title="AI Mail Assistant API")
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
-REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+FRONTEND_SUCCESS_URL = os.getenv(
+    "FRONTEND_SUCCESS_URL",
+    "https://officeflowcompany.com/onboarding/success",
+)
+
+GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 
 
-def decode_base64(data):
+def require_env(value: str | None, name: str) -> str:
+    if not value:
+        raise HTTPException(status_code=500, detail=f"Missing environment variable: {name}")
+    return value
+
+
+def decode_base64(data: str | None) -> str | None:
     if not data:
         return None
 
@@ -28,81 +42,21 @@ def decode_base64(data):
     if padding:
         data += "=" * (4 - padding)
 
-    decoded_bytes = base64.urlsafe_b64decode(data)
-    return decoded_bytes.decode("utf-8", errors="ignore")
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-
-@app.get("/auth/google/start")
-def google_login():
-    url = (
-        "https://accounts.google.com/o/oauth2/v2/auth"
-        f"?client_id={GOOGLE_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        "&response_type=code"
-        "&scope=openid email profile https://www.googleapis.com/auth/gmail.modify"
-        "&access_type=offline"
-        "&prompt=consent"
-    )
-    return RedirectResponse(url)
-
-
-async def supabase_upsert_user(email: str, full_name: str | None):
-    async with httpx.AsyncClient() as client:
-        res = await client.post(
-            f"{SUPABASE_URL}/rest/v1/users",
-            headers={
-                "apikey": SUPABASE_SERVICE_ROLE_KEY,
-                "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-                "Content-Type": "application/json",
-                "Prefer": "resolution=merge-duplicates,return=representation",
-            },
-            json=[
-                {
-                    "email": email,
-                    "full_name": full_name,
-                }
-            ],
-        )
-        return res.json()
-
-
-def extract_plain_text_from_payload(payload: dict):
-    if not payload:
+    try:
+        decoded_bytes = base64.urlsafe_b64decode(data)
+        return decoded_bytes.decode("utf-8", errors="ignore")
+    except Exception:
         return None
 
-    if payload.get("mimeType") == "text/plain":
-        data = payload.get("body", {}).get("data")
-        return decode_base64(data)
 
-    parts = payload.get("parts", [])
-    for part in parts:
-        if part.get("mimeType") == "text/plain":
-            data = part.get("body", {}).get("data")
-            return decode_base64(data)
-
-        nested_parts = part.get("parts", [])
-        for nested_part in nested_parts:
-            if nested_part.get("mimeType") == "text/plain":
-                data = nested_part.get("body", {}).get("data")
-                return decode_base64(data)
-
-    data = payload.get("body", {}).get("data")
-    return decode_base64(data)
-
-
-def get_header_value(headers: list, name: str):
+def get_header_value(headers: list, name: str) -> str | None:
     for header in headers:
         if header.get("name", "").lower() == name.lower():
             return header.get("value")
     return None
 
 
-def extract_email_address(from_header: str | None):
+def extract_email_address(from_header: str | None) -> str | None:
     if not from_header:
         return None
 
@@ -112,9 +66,318 @@ def extract_email_address(from_header: str | None):
     return from_header.strip()
 
 
-async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None):
-    if not OPENAI_API_KEY:
-        return "OPENAI_API_KEY ontbreekt in .env"
+def extract_plain_text_from_payload(payload: dict) -> str | None:
+    if not payload:
+        return None
+
+    if payload.get("mimeType") == "text/plain":
+        return decode_base64(payload.get("body", {}).get("data"))
+
+    for part in payload.get("parts", []):
+        if part.get("mimeType") == "text/plain":
+            return decode_base64(part.get("body", {}).get("data"))
+
+        for nested_part in part.get("parts", []):
+            if nested_part.get("mimeType") == "text/plain":
+                return decode_base64(nested_part.get("body", {}).get("data"))
+
+    return decode_base64(payload.get("body", {}).get("data"))
+
+
+async def supabase_get_user_by_email(email: str):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+    encoded_email = quote(email, safe="")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{supabase_url}/rest/v1/users?email=eq.{encoded_email}&select=*",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+            },
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase get user failed: {data}",
+            )
+
+        if isinstance(data, list) and data:
+            return data[0]
+
+        return None
+
+
+async def supabase_insert_user(email: str, full_name: str | None):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/users",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=[
+                {
+                    "email": email,
+                    "full_name": full_name,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase users insert failed: {data}",
+            )
+
+        if not data or not isinstance(data, list):
+            raise HTTPException(status_code=500, detail="Supabase users insert returned no rows")
+
+        return data[0]
+
+
+async def supabase_upsert_user(email: str, full_name: str | None):
+    existing_user = await supabase_get_user_by_email(email)
+
+    if existing_user:
+        return existing_user
+
+    return await supabase_insert_user(email, full_name)
+
+
+async def supabase_upsert_oauth_account(
+    user_id: str,
+    provider: str,
+    provider_account_id: str | None,
+    access_token: str | None,
+    refresh_token: str | None,
+    expiry_date: str | None,
+    scope: str | None,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/oauth_accounts?on_conflict=user_id,provider",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json=[
+                {
+                    "user_id": user_id,
+                    "provider": provider,
+                    "provider_account_id": provider_account_id,
+                    "access_token": access_token,
+                    "refresh_token": refresh_token,
+                    "expiry_date": expiry_date,
+                    "scope": scope,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase oauth_accounts upsert failed: {data}",
+            )
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_upsert_mailbox(
+    user_id: str,
+    provider: str,
+    email_address: str,
+    status: str = "connected",
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/mailboxes?on_conflict=user_id,provider,email_address",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json=[
+                {
+                    "user_id": user_id,
+                    "provider": provider,
+                    "email_address": email_address,
+                    "status": status,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase mailboxes upsert failed: {data}",
+            )
+
+        if not data or not isinstance(data, list):
+            raise HTTPException(status_code=500, detail="Supabase mailboxes upsert returned no rows")
+
+        return data[0]
+
+
+async def supabase_upsert_onboarding_state(
+    user_id: str,
+    gmail_connected: bool,
+    profile_completed: bool,
+    initial_sync_completed: bool,
+    first_draft_generated: bool,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/onboarding_state?on_conflict=user_id",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json=[
+                {
+                    "user_id": user_id,
+                    "gmail_connected": gmail_connected,
+                    "profile_completed": profile_completed,
+                    "initial_sync_completed": initial_sync_completed,
+                    "first_draft_generated": first_draft_generated,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase onboarding_state upsert failed: {data}",
+            )
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_insert_email(
+    user_id: str,
+    mailbox_id: str,
+    gmail_message_id: str,
+    gmail_thread_id: str | None,
+    subject: str | None,
+    from_email: str | None,
+    from_name: str | None,
+    snippet: str | None,
+    status: str = "new",
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/emails?on_conflict=gmail_message_id",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json=[
+                {
+                    "user_id": user_id,
+                    "mailbox_id": mailbox_id,
+                    "gmail_message_id": gmail_message_id,
+                    "gmail_thread_id": gmail_thread_id,
+                    "subject": subject,
+                    "from_email": from_email,
+                    "from_name": from_name,
+                    "snippet": snippet,
+                    "status": status,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase emails insert failed: {data}",
+            )
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_insert_draft(
+    user_id: str,
+    email_id: str,
+    gmail_draft_id: str | None,
+    subject: str | None,
+    draft_body: str,
+    status: str = "generated",
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/drafts",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=[
+                {
+                    "user_id": user_id,
+                    "email_id": email_id,
+                    "gmail_draft_id": gmail_draft_id,
+                    "subject": subject,
+                    "draft_body": draft_body,
+                    "status": status,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase drafts insert failed: {data}",
+            )
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None) -> str:
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
     prompt = f"""
 Je bent een slimme e-mailassistent.
@@ -132,10 +395,10 @@ E-mail:
 """.strip()
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        res = await client.post(
+        response = await client.post(
             "https://api.openai.com/v1/chat/completions",
             headers={
-                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
             },
             json={
@@ -150,11 +413,11 @@ E-mail:
                         "content": prompt
                     }
                 ],
-                "temperature": 0.5
+                "temperature": 0.5,
             },
         )
 
-        data = res.json()
+        data = response.json()
 
         if "choices" not in data:
             return f"AI fout: {data}"
@@ -162,7 +425,12 @@ E-mail:
         return data["choices"][0]["message"]["content"]
 
 
-async def create_gmail_draft(access_token: str, to_email: str, subject: str | None, body: str):
+async def create_gmail_draft(
+    access_token: str,
+    to_email: str,
+    subject: str | None,
+    body: str,
+):
     message = MIMEText(body)
     message["to"] = to_email
     message["subject"] = f"Re: {subject}" if subject else "Re:"
@@ -170,7 +438,7 @@ async def create_gmail_draft(access_token: str, to_email: str, subject: str | No
     raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
 
     async with httpx.AsyncClient(timeout=60.0) as client:
-        res = await client.post(
+        response = await client.post(
             "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
             headers={
                 "Authorization": f"Bearer {access_token}",
@@ -182,62 +450,133 @@ async def create_gmail_draft(access_token: str, to_email: str, subject: str | No
                 }
             },
         )
-        return res.json()
+
+        return response.json()
+
+
+@app.get("/")
+def home():
+    return {
+        "name": "AI Mail Assistant API",
+        "status": "online",
+        "message": "API is running."
+    }
+
+
+@app.get("/privacy")
+def privacy():
+    return {
+        "title": "Privacy Policy",
+        "content": (
+            "We use Google account data only to authenticate users, read selected Gmail messages, "
+            "generate AI-based email drafts, and create Gmail draft replies. "
+            "We do not sell user data or share Gmail content with third parties except where required "
+            "to provide the AI drafting service."
+        ),
+    }
+
+
+@app.get("/terms")
+def terms():
+    return {
+        "title": "Terms of Service",
+        "content": (
+            "This service helps generate AI email drafts. Users are responsible for reviewing all drafts "
+            "before sending. We do not guarantee correctness, completeness, or suitability of generated content."
+        ),
+    }
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
+
+
+@app.get("/auth/google/start")
+def google_login():
+    client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
+    redirect_uri = require_env(GOOGLE_REDIRECT_URI, "GOOGLE_REDIRECT_URI")
+
+    url = (
+        "https://accounts.google.com/o/oauth2/v2/auth"
+        f"?client_id={client_id}"
+        f"&redirect_uri={redirect_uri}"
+        "&response_type=code"
+        f"&scope={GMAIL_SCOPE}"
+        "&access_type=offline"
+        "&prompt=consent"
+    )
+    return RedirectResponse(url)
 
 
 @app.get("/auth/google/callback")
 async def google_callback(code: str):
-    async with httpx.AsyncClient() as client:
-        token_res = await client.post(
+    client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
+    client_secret = require_env(GOOGLE_CLIENT_SECRET, "GOOGLE_CLIENT_SECRET")
+    redirect_uri = require_env(GOOGLE_REDIRECT_URI, "GOOGLE_REDIRECT_URI")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        token_response = await client.post(
             "https://oauth2.googleapis.com/token",
             data={
                 "code": code,
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": REDIRECT_URI,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "redirect_uri": redirect_uri,
                 "grant_type": "authorization_code",
             },
         )
-        token_json = token_res.json()
-        access_token = token_json.get("access_token")
+        token_data = token_response.json()
 
-        user_res = await client.get(
+        access_token = token_data.get("access_token")
+        refresh_token = token_data.get("refresh_token")
+        scope = token_data.get("scope")
+        expires_in = token_data.get("expires_in")
+        expiry_date = None
+
+        if expires_in:
+            expiry_date = None
+
+        if not access_token:
+            raise HTTPException(status_code=400, detail=f"Google token error: {token_data}")
+
+        user_response = await client.get(
             "https://www.googleapis.com/oauth2/v2/userinfo",
-            headers={
-                "Authorization": f"Bearer {access_token}"
-            },
+            headers={"Authorization": f"Bearer {access_token}"},
         )
-        user = user_res.json()
+        user = user_response.json()
 
-        gmail_res = await client.get(
+        if not user.get("email"):
+            raise HTTPException(status_code=400, detail=f"Google userinfo error: {user}")
+
+        gmail_response = await client.get(
             "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-            headers={
-                "Authorization": f"Bearer {access_token}"
-            },
+            headers={"Authorization": f"Bearer {access_token}"},
             params={
                 "maxResults": 5,
                 "labelIds": "INBOX",
                 "q": "-category:social -category:promotions -category:updates",
             },
         )
-        gmail_data = gmail_res.json()
+        gmail_data = gmail_response.json()
 
         messages = gmail_data.get("messages", [])
+        first_email = None
         body_text = None
         subject = None
         sender = None
-        first_email = None
+        first_message_id = None
+        first_thread_id = None
 
         if messages:
-            first_id = messages[0]["id"]
+            first_message_id = messages[0]["id"]
+            first_thread_id = messages[0].get("threadId")
 
-            email_res = await client.get(
-                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{first_id}",
-                headers={
-                    "Authorization": f"Bearer {access_token}"
-                },
+            email_response = await client.get(
+                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{first_message_id}",
+                headers={"Authorization": f"Bearer {access_token}"},
             )
-            first_email = email_res.json()
+            first_email = email_response.json()
 
             payload = first_email.get("payload", {})
             headers = payload.get("headers", [])
@@ -251,33 +590,91 @@ async def google_callback(code: str):
         full_name=user.get("name"),
     )
 
-    ai_reply = await generate_ai_reply(
-        subject=subject,
-        sender=sender,
-        body_text=body_text,
+    user_id = saved_user["id"]
+
+    await supabase_upsert_oauth_account(
+        user_id=user_id,
+        provider="google",
+        provider_account_id=user.get("id"),
+        access_token=access_token,
+        refresh_token=refresh_token,
+        expiry_date=expiry_date,
+        scope=scope,
     )
 
-    to_email = extract_email_address(sender)
-    draft_result = None
+    mailbox = await supabase_upsert_mailbox(
+        user_id=user_id,
+        provider="gmail",
+        email_address=user.get("email"),
+        status="connected",
+    )
 
-    if to_email and ai_reply and not str(ai_reply).startswith("AI fout:"):
-        draft_result = await create_gmail_draft(
-            access_token=access_token,
-            to_email=to_email,
+    mailbox_id = mailbox["id"]
+
+    await supabase_upsert_onboarding_state(
+        user_id=user_id,
+        gmail_connected=True,
+        profile_completed=True,
+        initial_sync_completed=False,
+        first_draft_generated=False,
+    )
+
+    email_row = None
+    draft_result = None
+    ai_reply = None
+
+    if first_email:
+        payload = first_email.get("payload", {})
+        headers = payload.get("headers", [])
+        from_header = get_header_value(headers, "From")
+        from_email = extract_email_address(from_header)
+
+        email_row = await supabase_insert_email(
+            user_id=user_id,
+            mailbox_id=mailbox_id,
+            gmail_message_id=first_message_id,
+            gmail_thread_id=first_thread_id,
             subject=subject,
-            body=ai_reply,
+            from_email=from_email,
+            from_name=from_header,
+            snippet=body_text[:500] if body_text else None,
+            status="new",
         )
 
-    return {
-        "google_user": {
-            "email": user.get("email"),
-            "name": user.get("name"),
-        },
-        "gmail_messages": gmail_data,
-        "subject": subject,
-        "from": sender,
-        "email_preview": body_text[:500] if body_text else None,
-        "ai_reply": ai_reply,
-        "draft_result": draft_result,
-        "supabase_user": saved_user,
-    }
+        ai_reply = await generate_ai_reply(
+            subject=subject,
+            sender=sender,
+            body_text=body_text,
+        )
+
+        to_email = extract_email_address(sender)
+
+        if to_email and ai_reply and not ai_reply.startswith("AI fout:"):
+            draft_result = await create_gmail_draft(
+                access_token=access_token,
+                to_email=to_email,
+                subject=subject,
+                body=ai_reply,
+            )
+
+            gmail_draft_id = draft_result.get("id")
+
+            if email_row and gmail_draft_id:
+                await supabase_insert_draft(
+                    user_id=user_id,
+                    email_id=email_row["id"],
+                    gmail_draft_id=gmail_draft_id,
+                    subject=subject,
+                    draft_body=ai_reply,
+                    status="generated",
+                )
+
+                await supabase_upsert_onboarding_state(
+                    user_id=user_id,
+                    gmail_connected=True,
+                    profile_completed=True,
+                    initial_sync_completed=False,
+                    first_draft_generated=True,
+                )
+
+    return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
