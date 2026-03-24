@@ -1,5 +1,3 @@
-# billing.py
-
 import os
 import stripe
 
@@ -27,7 +25,7 @@ async def create_checkout_session(plan: str = "starter"):
                 "quantity": 1,
             }
         ],
-        success_url="https://officeflow-site2.vercel.app/payment/success",
+        success_url="https://officeflow-site2.vercel.app/payment/success?session_id={CHECKOUT_SESSION_ID}",
         cancel_url="https://officeflow-site2.vercel.app/payment/cancel",
     )
 
