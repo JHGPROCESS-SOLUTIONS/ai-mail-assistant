@@ -27,8 +27,8 @@ async def create_checkout_session(plan: str = "starter"):
                 "quantity": 1,
             }
         ],
-        success_url="https://jouwdomein.vercel.app/payment/success",
-        cancel_url="https://jouwdomein.vercel.app/payment/cancel",
+        success_url="https://officeflow-site2.vercel.app/payment/success",
+        cancel_url="https://officeflow-site2.vercel.app/payment/cancel",
     )
 
     return JSONResponse({"url": session.url})
