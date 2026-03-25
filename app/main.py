@@ -8,9 +8,12 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
+from app.billing import router as billing_router
+
 load_dotenv()
 
 app = FastAPI(title="AI Mail Assistant API")
+app.include_router(billing_router)
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
