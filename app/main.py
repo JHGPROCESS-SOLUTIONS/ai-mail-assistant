@@ -6,6 +6,7 @@ from urllib.parse import quote
 import httpx
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
 from app.billing import router as billing_router
@@ -13,6 +14,21 @@ from app.billing import router as billing_router
 load_dotenv()
 
 app = FastAPI(title="AI Mail Assistant API")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://officeflow-site-one.vercel.app",
+        "https://officeflowcompany.com",
+        "https://www.officeflowcompany.com",
+        "http://localhost:3000",
+        "http://127.0.0.1:5500",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 app.include_router(billing_router)
 
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
