@@ -1,8 +1,8 @@
 import os
 import stripe
 
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, HTTPException
+from fastapi.responses import JSONResponse, RedirectResponse
 
 router = APIRouter()
 
@@ -11,24 +11,53 @@ stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 PRICE_STARTER = "price_1TEU9gPBSJU3A3dnTg1vAPCx"
 PRICE_PRO = "price_1TEUABPBSJU3A3dnFlIlIxzr"
 
+SUCCESS_URL = "https://officeflow-site-one.vercel.app/payment/success"
+CANCEL_URL = "https://officeflow-site-one.vercel.app"
+
+
+def get_price_id(plan: str) -> str:
+    return PRICE_STARTER if plan == "starter" else PRICE_PRO
+
 
 @router.post("/billing/create-checkout-session")
 async def create_checkout_session(plan: str = "starter"):
-    price_id = PRICE_STARTER if plan == "starter" else PRICE_PRO
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="subscription",
+            line_items=[
+                {
+                    "price": get_price_id(plan),
+                    "quantity": 1,
+                }
+            ],
+            success_url=SUCCESS_URL,
+            cancel_url=CANCEL_URL,
+        )
 
-    session = stripe.checkout.Session.create(
-        payment_method_types=["card"],
-        mode="subscription",
-        line_items=[
-            {
-                "price": price_id,
-                "quantity": 1,
-            }
-        ],
-        success_url="https://officeflow-site-one.vercel.app/payment/success",
-        cancel_url="https://officeflow-site-one.vercel.app",
-    )
+        return JSONResponse({"url": session.url})
 
-    return JSONResponse({
-        "url": session.url
-    })
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
+
+
+@router.get("/billing/start-checkout")
+async def start_checkout(plan: str = "starter"):
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            mode="subscription",
+            line_items=[
+                {
+                    "price": get_price_id(plan),
+                    "quantity": 1,
+                }
+            ],
+            success_url=SUCCESS_URL,
+            cancel_url=CANCEL_URL,
+        )
+
+        return RedirectResponse(url=session.url, status_code=303)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Stripe error: {str(e)}")
