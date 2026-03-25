@@ -4,8 +4,9 @@ from email.mime.text import MIMEText
 from urllib.parse import quote
 
 import httpx
+import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 
@@ -43,6 +44,7 @@ FRONTEND_SUCCESS_URL = os.getenv(
     "FRONTEND_SUCCESS_URL",
     "https://officeflowcompany.com/onboarding/success",
 )
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 
@@ -173,6 +175,50 @@ async def supabase_upsert_user(email: str, full_name: str | None):
         return existing_user
 
     return await supabase_insert_user(email, full_name)
+
+
+async def supabase_update_user_subscription(
+    user_id: str,
+    subscription_status: str | None,
+    access_allowed: bool,
+    stripe_customer_id: str | None = None,
+    stripe_subscription_id: str | None = None,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    payload = {
+        "subscription_status": subscription_status,
+        "access_allowed": access_allowed,
+    }
+
+    if stripe_customer_id is not None:
+        payload["stripe_customer_id"] = stripe_customer_id
+
+    if stripe_subscription_id is not None:
+        payload["stripe_subscription_id"] = stripe_subscription_id
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.patch(
+            f"{supabase_url}/rest/v1/users?id=eq.{user_id}",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=payload,
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Supabase subscription update failed: {data}",
+            )
+
+        return data[0] if isinstance(data, list) and data else data
 
 
 async def supabase_upsert_oauth_account(
@@ -697,3 +743,82 @@ async def google_callback(code: str):
                 )
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
+
+
+@app.post("/webhooks/stripe")
+async def stripe_webhook(request: Request):
+    webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
+
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload=payload,
+            sig_header=sig_header,
+            secret=webhook_secret,
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
+
+    event_type = event["type"]
+    data = event["data"]["object"]
+
+    print("Stripe webhook received:", event_type)
+
+    if event_type == "checkout.session.completed":
+        email = data.get("customer_email") or data.get("client_reference_id")
+        customer_id = data.get("customer")
+        subscription_id = data.get("subscription")
+
+        if email:
+            user = await supabase_get_user_by_email(email)
+
+            if user:
+                await supabase_update_user_subscription(
+                    user_id=user["id"],
+                    subscription_status="active",
+                    access_allowed=True,
+                    stripe_customer_id=customer_id,
+                    stripe_subscription_id=subscription_id,
+                )
+
+    elif event_type in ["customer.subscription.updated", "customer.subscription.deleted"]:
+        status = data.get("status")
+        customer_id = data.get("customer")
+        subscription_id = data.get("id")
+
+        access_allowed = status in ["active", "trialing"]
+
+        supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+        service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.get(
+                f"{supabase_url}/rest/v1/users?stripe_customer_id=eq.{customer_id}&select=*",
+                headers={
+                    "apikey": service_role_key,
+                    "Authorization": f"Bearer {service_role_key}",
+                },
+            )
+
+            users = response.json()
+
+            if response.status_code >= 400:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Supabase webhook user lookup failed: {users}",
+                )
+
+            if isinstance(users, list) and users:
+                user = users[0]
+
+                await supabase_update_user_subscription(
+                    user_id=user["id"],
+                    subscription_status=status,
+                    access_allowed=access_allowed,
+                    stripe_customer_id=customer_id,
+                    stripe_subscription_id=subscription_id,
+                )
+
+    return {"received": True}
