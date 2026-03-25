@@ -25,10 +25,12 @@ async def create_checkout_session(plan: str = "starter"):
                 "quantity": 1,
             }
         ],
-        success_url="https://ai-mail-assistant-production-979f.up.railway.app/auth/google/start",
+        success_url="https://officeflow-site2.vercel.app/payment/success?session_id={CHECKOUT_SESSION_ID}",
         cancel_url="https://officeflow-site2.vercel.app/payment/cancel",
     )
 
     return JSONResponse({
-        "url": session.url
+        "url": session.url,
+        "success_url": session.success_url,
+        "session_id": session.id,
     })
