@@ -6,7 +6,7 @@ from urllib.parse import quote
 import httpx
 import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 
@@ -838,7 +838,6 @@ async def google_callback(code: str):
     )
 
     email_row = None
-    draft_result = None
     ai_reply = None
 
     if first_email:
@@ -907,13 +906,32 @@ async def test_protected(email: str):
 @app.get("/test/protected-ui")
 async def test_protected_ui(email: str):
     await ensure_user_has_access(email)
-    return JSONResponse(
-        content={
-            "status": "allowed",
-            "email": email,
-            "message": "Protected route accessible",
-        }
+    return {
+        "status": "allowed",
+        "email": email,
+        "message": "Protected route accessible",
+    }
+
+
+@app.post("/ai/reply")
+async def ai_reply_route(
+    email: str = Body(...),
+    subject: str | None = Body(default=None),
+    sender: str | None = Body(default=None),
+    body_text: str | None = Body(default=None),
+):
+    await ensure_user_has_access(email)
+
+    reply = await generate_ai_reply(
+        subject=subject,
+        sender=sender,
+        body_text=body_text,
     )
+
+    return {
+        "status": "ok",
+        "reply": reply,
+    }
 
 
 @app.post("/webhooks/stripe")
