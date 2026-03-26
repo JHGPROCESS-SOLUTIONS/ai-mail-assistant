@@ -767,20 +767,26 @@ async def stripe_webhook(request: Request):
     print("Stripe webhook received:", event_type)
 
     if event_type == "checkout.session.completed":
-        email = data.get("customer_email") or data.get("client_reference_id")
-        customer_id = data.get("customer")
-        subscription_id = data.get("subscription")
+    email = data.get("customer_email") or data.get("client_reference_id")
+    customer_id = data.get("customer")
+    subscription_id = data.get("subscription")
 
-        if email:
-            user = await supabase_get_user_by_email(email)
+    if email:
+        user = await supabase_get_user_by_email(email)
 
-            if user:
-                await supabase_update_user_subscription(
-                    user_id=user["id"],
-                    subscription_status="active",
-                    access_allowed=True,
-                    stripe_customer_id=customer_id,
-                    stripe_subscription_id=subscription_id,
+        if not user:
+            user = await supabase_insert_user(
+                email=email,
+                full_name=None,
+            )
+
+        await supabase_update_user_subscription(
+            user_id=user["id"],
+            subscription_status="active",
+            access_allowed=True,
+            stripe_customer_id=customer_id,
+            stripe_subscription_id=subscription_id,
+        ) 
                 )
 
     elif event_type in ["customer.subscription.updated", "customer.subscription.deleted"]:
