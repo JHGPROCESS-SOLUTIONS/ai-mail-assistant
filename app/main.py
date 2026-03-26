@@ -158,6 +158,24 @@ async def supabase_get_user_by_email(email: str):
         return None
 
 
+async def ensure_user_has_access(email: str):
+    if not email:
+        raise HTTPException(status_code=401, detail="Missing user email")
+
+    user = await supabase_get_user_by_email(email)
+
+    if not user:
+        raise HTTPException(status_code=403, detail="No user record found")
+
+    access_allowed = bool(user.get("access_allowed"))
+    subscription_status = user.get("subscription_status")
+
+    if not access_allowed or subscription_status not in ALLOWED_SUBSCRIPTION_STATUSES:
+        raise HTTPException(status_code=403, detail="Active subscription required")
+
+    return user
+
+
 async def supabase_get_user_by_stripe_customer_id(customer_id: str):
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
     service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
@@ -732,19 +750,19 @@ async def google_callback(code: str):
         if not user_email:
             raise HTTPException(status_code=400, detail=f"Google userinfo error: {user}")
 
-    existing_user = await supabase_get_user_by_email(user_email)
+    try:
+        existing_user = await ensure_user_has_access(user_email)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            reason = "subscription_required"
+            if exc.detail == "No user record found":
+                reason = "no_subscription_record"
 
-    if not existing_user:
-        return RedirectResponse(
-            url=build_pricing_redirect("no_subscription_record"),
-            status_code=302,
-        )
-
-    if not has_active_access(existing_user):
-        return RedirectResponse(
-            url=build_pricing_redirect("subscription_required"),
-            status_code=302,
-        )
+            return RedirectResponse(
+                url=build_pricing_redirect(reason),
+                status_code=302,
+            )
+        raise
 
     user_id = existing_user["id"]
 
