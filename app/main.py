@@ -749,81 +749,97 @@ async def google_callback(code: str):
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
 
-    payload = await request.body()
-    sig_header = request.headers.get("stripe-signature")
-
     try:
+        payload = await request.body()
+        sig_header = request.headers.get("stripe-signature")
+
         event = stripe.Webhook.construct_event(
             payload=payload,
             sig_header=sig_header,
             secret=webhook_secret,
         )
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Webhook error: {str(e)}")
 
-    event_type = event["type"]
-    data = event["data"]["object"]
+        event_type = event["type"]
+        data = event["data"]["object"]
 
-    print("Stripe webhook received:", event_type)
+        print("Stripe webhook received:", event_type)
+        print("Stripe webhook data keys:", list(data.keys()) if isinstance(data, dict) else type(data))
 
-    if event_type == "checkout.session.completed":
-        email = data.get("customer_email") or data.get("client_reference_id")
-        customer_id = data.get("customer")
-        subscription_id = data.get("subscription")
+        if event_type == "checkout.session.completed":
+            email = data.get("customer_email") or data.get("client_reference_id")
+            customer_id = data.get("customer")
+            subscription_id = data.get("subscription")
 
-        if email:
-            user = await supabase_get_user_by_email(email)
+            print("checkout.session.completed email:", email)
+            print("checkout.session.completed customer_id:", customer_id)
+            print("checkout.session.completed subscription_id:", subscription_id)
 
-            if not user:
-                user = await supabase_insert_user(
-                    email=email,
-                    full_name=None,
-                )
+            if email:
+                user = await supabase_get_user_by_email(email)
+                print("user found:", user)
 
-            await supabase_update_user_subscription(
-                user_id=user["id"],
-                subscription_status="active",
-                access_allowed=True,
-                stripe_customer_id=customer_id,
-                stripe_subscription_id=subscription_id,
-            )
+                if not user:
+                    user = await supabase_insert_user(
+                        email=email,
+                        full_name=None,
+                    )
+                    print("user created:", user)
 
-    elif event_type in ["customer.subscription.updated", "customer.subscription.deleted"]:
-        status = data.get("status")
-        customer_id = data.get("customer")
-        subscription_id = data.get("id")
-
-        access_allowed = status in ["active", "trialing"]
-
-        supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
-        service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
-
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.get(
-                f"{supabase_url}/rest/v1/users?stripe_customer_id=eq.{customer_id}&select=*",
-                headers={
-                    "apikey": service_role_key,
-                    "Authorization": f"Bearer {service_role_key}",
-                },
-            )
-
-            users = response.json()
-
-            if response.status_code >= 400:
-                raise HTTPException(
-                    status_code=500,
-                    detail=f"Supabase webhook user lookup failed: {users}",
-                )
-
-            if isinstance(users, list) and users:
-                user = users[0]
-
-                await supabase_update_user_subscription(
+                updated_user = await supabase_update_user_subscription(
                     user_id=user["id"],
-                    subscription_status=status,
-                    access_allowed=access_allowed,
+                    subscription_status="active",
+                    access_allowed=True,
                     stripe_customer_id=customer_id,
                     stripe_subscription_id=subscription_id,
                 )
+                print("updated user:", updated_user)
 
-    return {"received": True}
+        elif event_type in ["customer.subscription.updated", "customer.subscription.deleted"]:
+            status = data.get("status")
+            customer_id = data.get("customer")
+            subscription_id = data.get("id")
+
+            print("subscription event status:", status)
+            print("subscription event customer_id:", customer_id)
+            print("subscription event subscription_id:", subscription_id)
+
+            access_allowed = status in ["active", "trialing"]
+
+            supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+            service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{supabase_url}/rest/v1/users?stripe_customer_id=eq.{customer_id}&select=*",
+                    headers={
+                        "apikey": service_role_key,
+                        "Authorization": f"Bearer {service_role_key}",
+                    },
+                )
+
+                users = response.json()
+                print("users by stripe_customer_id:", users)
+
+                if response.status_code >= 400:
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Supabase webhook user lookup failed: {users}",
+                    )
+
+                if isinstance(users, list) and users:
+                    user = users[0]
+
+                    updated_user = await supabase_update_user_subscription(
+                        user_id=user["id"],
+                        subscription_status=status,
+                        access_allowed=access_allowed,
+                        stripe_customer_id=customer_id,
+                        stripe_subscription_id=subscription_id,
+                    )
+                    print("updated user:", updated_user)
+
+        return {"received": True}
+
+    except Exception as e:
+        print("STRIPE WEBHOOK FATAL ERROR:", repr(e))
+        raise
