@@ -898,6 +898,24 @@ async def google_callback(code: str):
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
 
+@app.get("/test/protected")
+async def test_protected(email: str):
+    await ensure_user_has_access(email)
+    return {"status": "allowed"}
+
+
+@app.get("/test/protected-ui")
+async def test_protected_ui(email: str):
+    await ensure_user_has_access(email)
+    return JSONResponse(
+        content={
+            "status": "allowed",
+            "email": email,
+            "message": "Protected route accessible",
+        }
+    )
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
