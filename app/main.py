@@ -763,12 +763,12 @@ async def stripe_webhook(request: Request):
         data = event["data"]["object"]
 
         print("Stripe webhook received:", event_type)
-        print("Stripe webhook data keys:", list(data.keys()) if isinstance(data, dict) else type(data))
+        print("Stripe webhook data type:", type(data))
 
         if event_type == "checkout.session.completed":
-            email = data.get("customer_email") or data.get("client_reference_id")
-            customer_id = data.get("customer")
-            subscription_id = data.get("subscription")
+            email = getattr(data, "customer_email", None) or getattr(data, "client_reference_id", None)
+            customer_id = getattr(data, "customer", None)
+            subscription_id = getattr(data, "subscription", None)
 
             print("checkout.session.completed email:", email)
             print("checkout.session.completed customer_id:", customer_id)
@@ -795,9 +795,9 @@ async def stripe_webhook(request: Request):
                 print("updated user:", updated_user)
 
         elif event_type in ["customer.subscription.updated", "customer.subscription.deleted"]:
-            status = data.get("status")
-            customer_id = data.get("customer")
-            subscription_id = data.get("id")
+            status = getattr(data, "status", None)
+            customer_id = getattr(data, "customer", None)
+            subscription_id = getattr(data, "id", None)
 
             print("subscription event status:", status)
             print("subscription event customer_id:", customer_id)
