@@ -116,16 +116,6 @@ def extract_plain_text_from_payload(payload: dict) -> str | None:
     return decode_base64(payload.get("body", {}).get("data"))
 
 
-def has_active_access(user: dict | None) -> bool:
-    if not user:
-        return False
-
-    access_allowed = bool(user.get("access_allowed"))
-    subscription_status = user.get("subscription_status")
-
-    return access_allowed and subscription_status in ALLOWED_SUBSCRIPTION_STATUSES
-
-
 def build_pricing_redirect(reason: str) -> str:
     return f"{FRONTEND_PRICING_URL}?reason={quote(reason)}"
 
@@ -350,6 +340,8 @@ async def supabase_update_oauth_account_tokens(
 ):
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
     service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+    encoded_user_id = quote(user_id, safe="")
+    encoded_provider = quote(provider, safe="")
 
     payload = {}
     if access_token is not None:
@@ -364,7 +356,7 @@ async def supabase_update_oauth_account_tokens(
 
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.patch(
-            f"{supabase_url}/rest/v1/oauth_accounts?user_id=eq.{user_id}&provider=eq.{provider}",
+            f"{supabase_url}/rest/v1/oauth_accounts?user_id=eq.{encoded_user_id}&provider=eq.{encoded_provider}",
             headers={
                 "apikey": service_role_key,
                 "Authorization": f"Bearer {service_role_key}",
@@ -637,8 +629,10 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict | None = 
         )
 
         if response.status_code == 401 and refresh_token:
-            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
-
+            access_token = await refresh_google_access_token(
+                user_id=user_id,
+                refresh_token=refresh_token,
+            )
             response = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -675,8 +669,10 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict):
         )
 
         if response.status_code == 401 and refresh_token:
-            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
-
+            access_token = await refresh_google_access_token(
+                user_id=user_id,
+                refresh_token=refresh_token,
+            )
             response = await client.post(
                 url,
                 headers={
@@ -741,35 +737,6 @@ E-mail:
             return f"AI fout: {data}"
 
         return data["choices"][0]["message"]["content"]
-
-
-async def create_gmail_draft(
-    access_token: str,
-    to_email: str,
-    subject: str | None,
-    body: str,
-):
-    message = MIMEText(body)
-    message["to"] = to_email
-    message["subject"] = f"Re: {subject}" if subject else "Re:"
-
-    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            "https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "message": {
-                    "raw": raw_message
-                }
-            },
-        )
-
-        return response.json()
 
 
 @app.get("/")
@@ -874,11 +841,7 @@ async def google_callback(code: str):
         access_token = token_data.get("access_token")
         refresh_token = token_data.get("refresh_token")
         scope = token_data.get("scope")
-        expires_in = token_data.get("expires_in")
         expiry_date = None
-
-        if expires_in:
-            expiry_date = None
 
         if not access_token:
             raise HTTPException(status_code=400, detail=f"Google token error: {token_data}")
@@ -917,44 +880,6 @@ async def google_callback(code: str):
             full_name=user_name,
         )
 
-    first_email = None
-    body_text = None
-    subject = None
-    sender = None
-    first_message_id = None
-    first_thread_id = None
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        gmail_response = await client.get(
-            "https://gmail.googleapis.com/gmail/v1/users/me/messages",
-            headers={"Authorization": f"Bearer {access_token}"},
-            params={
-                "maxResults": 5,
-                "labelIds": "INBOX",
-                "q": "-category:social -category:promotions -category:updates",
-            },
-        )
-        gmail_data = gmail_response.json()
-
-        messages = gmail_data.get("messages", [])
-
-        if messages:
-            first_message_id = messages[0]["id"]
-            first_thread_id = messages[0].get("threadId")
-
-            email_response = await client.get(
-                f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{first_message_id}",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-            first_email = email_response.json()
-
-            payload = first_email.get("payload", {})
-            headers = payload.get("headers", [])
-
-            body_text = extract_plain_text_from_payload(payload)
-            subject = get_header_value(headers, "Subject")
-            sender = get_header_value(headers, "From")
-
     await supabase_upsert_oauth_account(
         user_id=user_id,
         provider="google",
@@ -982,66 +907,88 @@ async def google_callback(code: str):
         first_draft_generated=False,
     )
 
-    email_row = None
-    ai_reply = None
+    gmail_response = await gmail_get_json_for_user(
+        user_id=user_id,
+        url="https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        params={
+            "maxResults": 1,
+            "labelIds": "INBOX",
+            "q": "-category:social -category:promotions -category:updates",
+        },
+    )
 
-    if first_email:
-        payload = first_email.get("payload", {})
-        headers = payload.get("headers", [])
-        from_header = get_header_value(headers, "From")
-        from_email = extract_email_address(from_header)
+    messages = gmail_response.get("messages", [])
+    if not messages:
+        return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
-        email_row = await supabase_insert_email(
+    first_message_id = messages[0]["id"]
+    first_thread_id = messages[0].get("threadId")
+
+    first_email = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{first_message_id}",
+    )
+
+    payload = first_email.get("payload", {})
+    headers = payload.get("headers", [])
+    body_text = extract_plain_text_from_payload(payload)
+    subject = get_header_value(headers, "Subject")
+    sender = get_header_value(headers, "From")
+
+    from_header = get_header_value(headers, "From")
+    from_email = extract_email_address(from_header)
+
+    email_row = await supabase_insert_email(
+        user_id=user_id,
+        mailbox_id=mailbox_id,
+        gmail_message_id=first_message_id,
+        gmail_thread_id=first_thread_id,
+        subject=subject,
+        from_email=from_email,
+        from_name=from_header,
+        snippet=body_text[:500] if body_text else None,
+        status="new",
+    )
+
+    ai_reply = await generate_ai_reply(
+        subject=subject,
+        sender=sender,
+        body_text=body_text,
+    )
+
+    to_email = extract_email_address(sender)
+
+    if to_email and ai_reply and not ai_reply.startswith("AI fout:"):
+        message = MIMEText(ai_reply)
+        message["to"] = to_email
+        message["subject"] = f"Re: {subject}" if subject else "Re:"
+        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+        draft_result = await gmail_post_json_for_user(
             user_id=user_id,
-            mailbox_id=mailbox_id,
-            gmail_message_id=first_message_id,
-            gmail_thread_id=first_thread_id,
-            subject=subject,
-            from_email=from_email,
-            from_name=from_header,
-            snippet=body_text[:500] if body_text else None,
-            status="new",
+            url="https://gmail.googleapis.com/gmail/v1/users/me/drafts",
+            payload={"message": {"raw": raw_message}},
         )
 
-        ai_reply = await generate_ai_reply(
-            subject=subject,
-            sender=sender,
-            body_text=body_text,
-        )
+        gmail_draft_id = draft_result.get("id")
 
-        to_email = extract_email_address(sender)
-
-        if to_email and ai_reply and not ai_reply.startswith("AI fout:"):
-            draft_payload = MIMEText(ai_reply)
-            draft_payload["to"] = to_email
-            draft_payload["subject"] = f"Re: {subject}" if subject else "Re:"
-            raw_message = base64.urlsafe_b64encode(draft_payload.as_bytes()).decode()
-
-            draft_result = await gmail_post_json_for_user(
+        if email_row and gmail_draft_id:
+            await supabase_insert_draft(
                 user_id=user_id,
-                url="https://gmail.googleapis.com/gmail/v1/users/me/drafts",
-                payload={"message": {"raw": raw_message}},
+                email_id=email_row["id"],
+                gmail_draft_id=gmail_draft_id,
+                subject=subject,
+                draft_body=ai_reply,
+                status="generated",
             )
 
-            gmail_draft_id = draft_result.get("id")
-
-            if email_row and gmail_draft_id:
-                await supabase_insert_draft(
-                    user_id=user_id,
-                    email_id=email_row["id"],
-                    gmail_draft_id=gmail_draft_id,
-                    subject=subject,
-                    draft_body=ai_reply,
-                    status="generated",
-                )
-
-                await supabase_upsert_onboarding_state(
-                    user_id=user_id,
-                    gmail_connected=True,
-                    profile_completed=True,
-                    initial_sync_completed=False,
-                    first_draft_generated=True,
-                )
+            await supabase_upsert_onboarding_state(
+                user_id=user_id,
+                gmail_connected=True,
+                profile_completed=True,
+                initial_sync_completed=False,
+                first_draft_generated=True,
+            )
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
@@ -1085,72 +1032,59 @@ async def ai_reply_route(
 
 @app.get("/gmail/inbox")
 async def gmail_inbox(email: str, max_results: int = 10):
-    try:
-        print("STEP 1: start inbox")
+    user = await ensure_user_has_access(email)
 
-        user = await ensure_user_has_access(email)
-        print("STEP 2: user ok", user["id"])
+    if max_results < 1:
+        max_results = 1
+    if max_results > 20:
+        max_results = 20
 
-        if max_results < 1:
-            max_results = 1
-        if max_results > 20:
-            max_results = 20
+    gmail_data = await gmail_get_json_for_user(
+        user_id=user["id"],
+        url="https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        params={
+            "maxResults": max_results,
+            "labelIds": "INBOX",
+        },
+    )
 
-        print("STEP 3: fetch gmail list")
+    messages = gmail_data.get("messages", [])
+    results = []
 
-        gmail_data = await gmail_get_json_for_user(
+    for message in messages:
+        message_id = message.get("id")
+        if not message_id:
+            continue
+
+        message_data = await gmail_get_json_for_user(
             user_id=user["id"],
-            url="https://gmail.googleapis.com/gmail/v1/users/me/messages",
-            params={
-                "maxResults": max_results,
-                "labelIds": "INBOX",
-            },
+            url=f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
         )
 
-        messages = gmail_data.get("messages", [])
-        print("STEP 4: messages found", len(messages))
+        payload = message_data.get("payload", {})
+        headers = payload.get("headers", [])
 
-        results = []
+        from_header = get_header_value(headers, "From")
+        subject = get_header_value(headers, "Subject")
+        body_text = extract_plain_text_from_payload(payload)
 
-        for message in messages:
-            message_id = message.get("id")
-            if not message_id:
-                continue
+        results.append(
+            {
+                "gmail_message_id": message_data.get("id"),
+                "gmail_thread_id": message_data.get("threadId"),
+                "subject": subject,
+                "from_name": from_header,
+                "from_email": extract_email_address(from_header),
+                "snippet": message_data.get("snippet"),
+                "body_text": body_text[:500] if body_text else None,
+            }
+        )
 
-            print("STEP 4A: fetch message", message_id)
-
-            message_data = await gmail_get_json_for_user(
-                user_id=user["id"],
-                url=f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
-            )
-
-            payload = message_data.get("payload", {})
-            headers = payload.get("headers", [])
-
-            from_header = get_header_value(headers, "From")
-            subject = get_header_value(headers, "Subject")
-            body_text = extract_plain_text_from_payload(payload)
-
-            results.append(
-                {
-                    "id": message_id,
-                    "subject": subject,
-                    "from": from_header,
-                    "snippet": message_data.get("snippet"),
-                    "body": body_text,
-                }
-            )
-
-        print("STEP 5: success")
-
-        return {
-            "status": "ok",
-            "messages": results,
-        }
-
-    except Exception as e:
-        print("ERROR IN /gmail/inbox:", repr(e))
-        raise
+    return {
+        "status": "ok",
+        "count": len(results),
+        "messages": results,
+    }
 
 
 @app.post("/gmail/draft")
