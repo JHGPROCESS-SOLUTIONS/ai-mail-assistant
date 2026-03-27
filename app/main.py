@@ -1085,59 +1085,72 @@ async def ai_reply_route(
 
 @app.get("/gmail/inbox")
 async def gmail_inbox(email: str, max_results: int = 10):
-    user = await ensure_user_has_access(email)
+    try:
+        print("STEP 1: start inbox")
 
-    if max_results < 1:
-        max_results = 1
-    if max_results > 20:
-        max_results = 20
+        user = await ensure_user_has_access(email)
+        print("STEP 2: user ok", user["id"])
 
-    gmail_data = await gmail_get_json_for_user(
-        user_id=user["id"],
-        url="https://gmail.googleapis.com/gmail/v1/users/me/messages",
-        params={
-            "maxResults": max_results,
-            "labelIds": "INBOX",
-            "q": "-category:social -category:promotions -category:updates",
-        },
-    )
+        if max_results < 1:
+            max_results = 1
+        if max_results > 20:
+            max_results = 20
 
-    messages = gmail_data.get("messages", [])
-    results = []
+        print("STEP 3: fetch gmail list")
 
-    for message in messages:
-        message_id = message.get("id")
-        if not message_id:
-            continue
-
-        message_data = await gmail_get_json_for_user(
+        gmail_data = await gmail_get_json_for_user(
             user_id=user["id"],
-            url=f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            url="https://gmail.googleapis.com/gmail/v1/users/me/messages",
+            params={
+                "maxResults": max_results,
+                "labelIds": "INBOX",
+            },
         )
 
-        payload = message_data.get("payload", {})
-        headers = payload.get("headers", [])
-        from_header = get_header_value(headers, "From")
-        subject = get_header_value(headers, "Subject")
-        body_text = extract_plain_text_from_payload(payload)
+        messages = gmail_data.get("messages", [])
+        print("STEP 4: messages found", len(messages))
 
-        results.append(
-            {
-                "gmail_message_id": message_data.get("id"),
-                "gmail_thread_id": message_data.get("threadId"),
-                "subject": subject,
-                "from_name": from_header,
-                "from_email": extract_email_address(from_header),
-                "snippet": message_data.get("snippet"),
-                "body_text": body_text,
-            }
-        )
+        results = []
 
-    return {
-        "status": "ok",
-        "count": len(results),
-        "messages": results,
-    }
+        for message in messages:
+            message_id = message.get("id")
+            if not message_id:
+                continue
+
+            print("STEP 4A: fetch message", message_id)
+
+            message_data = await gmail_get_json_for_user(
+                user_id=user["id"],
+                url=f"https://gmail.googleapis.com/gmail/v1/users/me/messages/{message_id}",
+            )
+
+            payload = message_data.get("payload", {})
+            headers = payload.get("headers", [])
+
+            from_header = get_header_value(headers, "From")
+            subject = get_header_value(headers, "Subject")
+            body_text = extract_plain_text_from_payload(payload)
+
+            results.append(
+                {
+                    "id": message_id,
+                    "subject": subject,
+                    "from": from_header,
+                    "snippet": message_data.get("snippet"),
+                    "body": body_text,
+                }
+            )
+
+        print("STEP 5: success")
+
+        return {
+            "status": "ok",
+            "messages": results,
+        }
+
+    except Exception as e:
+        print("ERROR IN /gmail/inbox:", repr(e))
+        raise
 
 
 @app.post("/gmail/draft")
