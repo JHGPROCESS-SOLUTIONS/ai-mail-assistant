@@ -259,26 +259,6 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
     return None
 
 
-async def supabase_get_mailbox_by_tenant(tenant_id: str, provider: str = "gmail"):
-    data = await supabase_get(
-        (
-            "/rest/v1/mailboxes"
-            f"?tenant_id=eq.{quote(tenant_id, safe='')}"
-            f"&provider=eq.{quote(provider, safe='')}"
-            "&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
-        )
-    )
-
-    if not isinstance(data, list) or not data:
-        return None
-
-    for row in data:
-        if row.get("oauth_access_token"):
-            return row
-
-    return data[0]
-
-
 async def supabase_update_mailbox_tokens(
     mailbox_id: str,
     *,
@@ -531,10 +511,10 @@ async def gmail_post_json_for_mailbox(
 # Labels
 # ----------------------------
 
-async def setup_gmail_labels_for_tenant(tenant_id: str):
-    mailbox = await supabase_get_mailbox_by_tenant(tenant_id=tenant_id, provider="gmail")
-    if not mailbox:
-        raise HTTPException(status_code=404, detail="No Gmail mailbox found for tenant")
+async def setup_gmail_labels_for_mailbox(mailbox: dict):
+    tenant_id = mailbox.get("tenant_id")
+    if not tenant_id:
+        raise HTTPException(status_code=400, detail="Mailbox tenant_id missing for label setup")
 
     existing = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
@@ -757,12 +737,8 @@ async def google_callback(code: str):
     if refresh_token:
         mailbox["oauth_refresh_token"] = refresh_token
 
-    tenant_id = mailbox.get("tenant_id")
-
-    if not tenant_id:
-        refetched_mailbox = await ensure_mailbox_access(user_email)
-        mailbox = refetched_mailbox
-        tenant_id = mailbox["tenant_id"]
+    mailbox = await ensure_mailbox_access(user_email)
+    tenant_id = mailbox["tenant_id"]
 
     gmail_response = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
@@ -973,7 +949,7 @@ async def setup_labels(email: str = Body(...)):
     mailbox = await ensure_mailbox_access(email)
     tenant_id = mailbox["tenant_id"]
 
-    result = await setup_gmail_labels_for_tenant(tenant_id=tenant_id)
+    result = await setup_gmail_labels_for_mailbox(mailbox)
 
     return {
         "status": "ok",
