@@ -556,14 +556,16 @@ async def supabase_insert_draft(
 
 async def supabase_upsert_gmail_label(
     user_id: str,
+    mailbox_id: str,
     label_name: str,
     label_id: str,
 ) -> dict[str, Any] | None:
     data = await supabase_post(
-        "/rest/v1/gmail_labels?on_conflict=user_id,label_name",
+        "/rest/v1/gmail_labels?on_conflict=user_id,mailbox_id,label_name",
         [
             {
                 "user_id": user_id,
+                "mailbox_id": mailbox_id,
                 "label_name": label_name,
                 "label_id": label_id,
             }
@@ -729,7 +731,7 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
 # Labels
 # ----------------------------
 
-async def setup_gmail_labels_for_user(user_id: str) -> list[dict[str, Any]]:
+async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
     existing = await gmail_get_json_for_user(
         user_id=user_id,
         url=f"{GMAIL_API_BASE}/labels",
@@ -759,6 +761,7 @@ async def setup_gmail_labels_for_user(user_id: str) -> list[dict[str, Any]]:
 
         saved = await supabase_upsert_gmail_label(
             user_id=user_id,
+            mailbox_id=mailbox_id,
             label_name=label_name,
             label_id=label_id,
         )
@@ -1233,7 +1236,10 @@ async def setup_labels(email: str = Body(...)):
     user = context["user"]
     mailbox = context["mailbox"]
 
-    result = await setup_gmail_labels_for_user(user_id=user["id"])
+    result = await setup_gmail_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
 
     return {
         "status": "ok",
