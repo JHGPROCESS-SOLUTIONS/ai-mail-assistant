@@ -225,13 +225,13 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
             "/rest/v1/mailboxes"
             f"?address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
+            "&select=*"
         ),
         (
             "/rest/v1/mailboxes"
             f"?email_address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=id,provider,email_address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
+            "&select=*"
         ),
     ]
 
@@ -257,18 +257,6 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
         raise last_error
 
     return None
-
-
-async def supabase_try_get_mailbox_tenant_id(mailbox_id: str) -> str | None:
-    try:
-        data = await supabase_get(
-            f"/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}&select=id,tenant_id"
-        )
-        if isinstance(data, list) and data:
-            return data[0].get("tenant_id")
-        return None
-    except HTTPException:
-        return None
 
 
 async def supabase_update_mailbox_tokens(
@@ -383,9 +371,6 @@ async def ensure_mailbox_access(email: str):
 
     if not mailbox:
         raise HTTPException(status_code=404, detail="Mailbox not found")
-
-    tenant_id = await supabase_try_get_mailbox_tenant_id(str(mailbox["id"]))
-    mailbox["tenant_id"] = tenant_id
 
     return mailbox
 
@@ -510,8 +495,6 @@ async def gmail_post_json_for_mailbox(
 # ----------------------------
 
 async def setup_gmail_labels_for_mailbox(mailbox: dict):
-    tenant_id = mailbox.get("tenant_id")
-
     existing = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
         url=f"{GMAIL_API_BASE}/labels",
@@ -523,6 +506,7 @@ async def setup_gmail_labels_for_mailbox(mailbox: dict):
     }
 
     results = []
+    tenant_id = mailbox.get("tenant_id")
 
     for label_name in OFFICEFLOW_LABELS:
         if label_name in existing_map:
@@ -738,9 +722,6 @@ async def google_callback(code: str):
     if refresh_token:
         mailbox["oauth_refresh_token"] = refresh_token
 
-    mailbox = await ensure_mailbox_access(user_email)
-    tenant_id = mailbox.get("tenant_id")
-
     gmail_response = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
         url=f"{GMAIL_API_BASE}/messages",
@@ -770,6 +751,7 @@ async def google_callback(code: str):
     sender = get_header_value(headers, "From")
 
     to_email = extract_email_address(sender)
+    tenant_id = mailbox.get("tenant_id")
 
     message_row = None
     if tenant_id:
