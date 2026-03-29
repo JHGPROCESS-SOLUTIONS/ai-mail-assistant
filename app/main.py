@@ -56,6 +56,20 @@ STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing"}
 
+GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
+
+LABEL_SETUP_TENANT_ID = os.getenv(
+    "LABEL_SETUP_TENANT_ID",
+    "a5167089-5db8-45bf-ada8-16ae4c4c7884",
+)
+
+OFFICEFLOW_LABELS = [
+    "OfficeFlow/To Respond",
+    "OfficeFlow/FYI",
+    "OfficeFlow/Notification",
+    "OfficeFlow/Marketing",
+]
+
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -119,6 +133,10 @@ def extract_plain_text_from_payload(payload: dict) -> str | None:
 def build_pricing_redirect(reason: str) -> str:
     return f"{FRONTEND_PRICING_URL}?reason={quote(reason)}"
 
+
+# ----------------------------
+# Legacy users-based functions
+# ----------------------------
 
 async def supabase_get_user_by_email(email: str):
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
@@ -579,7 +597,166 @@ async def supabase_insert_draft(
         return data[0] if isinstance(data, list) and data else data
 
 
-async def refresh_google_access_token(user_id: str, refresh_token: str):
+# ----------------------------
+# Tenant-based helpers
+# ----------------------------
+
+async def supabase_get_profile_for_user(user_id: str):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            f"{supabase_url}/rest/v1/profiles?user_id=eq.{quote(user_id, safe='')}&select=*",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+            },
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=f"Supabase profiles lookup failed: {data}")
+
+        if isinstance(data, list) and data:
+            return data[0]
+
+        return None
+
+
+async def supabase_get_tenant_id_for_user(user_id: str) -> str | None:
+    profile = await supabase_get_profile_for_user(user_id)
+    if not profile:
+        return None
+    return profile.get("tenant_id")
+
+
+async def supabase_get_mailbox_with_tokens(tenant_id: str, provider: str = "gmail"):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(
+            (
+                f"{supabase_url}/rest/v1/mailboxes"
+                f"?tenant_id=eq.{quote(tenant_id, safe='')}"
+                f"&provider=eq.{quote(provider, safe='')}"
+                f"&select=*"
+            ),
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+            },
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=f"Supabase mailbox lookup failed: {data}")
+
+        if isinstance(data, list) and data:
+            return data[0]
+
+        return None
+
+
+async def supabase_update_mailbox_tokens(
+    tenant_id: str,
+    provider: str,
+    access_token: str | None = None,
+    refresh_token: str | None = None,
+    token_expires_at: str | None = None,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    payload = {}
+    if access_token is not None:
+        payload["oauth_access_token"] = access_token
+    if refresh_token is not None:
+        payload["oauth_refresh_token"] = refresh_token
+    if token_expires_at is not None:
+        payload["oauth_token_expires_at"] = token_expires_at
+
+    if not payload:
+        return None
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.patch(
+            (
+                f"{supabase_url}/rest/v1/mailboxes"
+                f"?tenant_id=eq.{quote(tenant_id, safe='')}"
+                f"&provider=eq.{quote(provider, safe='')}"
+            ),
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "return=representation",
+            },
+            json=payload,
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=f"Supabase mailbox token update failed: {data}")
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_upsert_gmail_label(
+    tenant_id: str,
+    label_name: str,
+    label_id: str,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.post(
+            f"{supabase_url}/rest/v1/gmail_labels?on_conflict=tenant_id,label_name",
+            headers={
+                "apikey": service_role_key,
+                "Authorization": f"Bearer {service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=representation",
+            },
+            json=[
+                {
+                    "tenant_id": tenant_id,
+                    "label_name": label_name,
+                    "label_id": label_id,
+                }
+            ],
+        )
+
+        data = response.json()
+
+        if response.status_code >= 400:
+            raise HTTPException(status_code=500, detail=f"Supabase gmail_labels upsert failed: {data}")
+
+        return data[0] if isinstance(data, list) and data else data
+
+
+async def resolve_tenant_id(user_id: str | None = None, tenant_id: str | None = None) -> str:
+    if tenant_id:
+        return tenant_id
+
+    if user_id:
+        resolved = await supabase_get_tenant_id_for_user(user_id)
+        if resolved:
+            return resolved
+
+    raise HTTPException(status_code=400, detail="Could not resolve tenant_id from user_id or request")
+
+
+# ----------------------------
+# Gmail helpers
+# ----------------------------
+
+async def refresh_google_access_token(tenant_id: str, refresh_token: str):
     client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
     client_secret = require_env(GOOGLE_CLIENT_SECRET, "GOOGLE_CLIENT_SECRET")
 
@@ -600,23 +777,31 @@ async def refresh_google_access_token(user_id: str, refresh_token: str):
         if not new_access_token:
             raise HTTPException(status_code=401, detail=f"Google token refresh failed: {data}")
 
-        await supabase_update_oauth_account_tokens(
-            user_id=user_id,
-            provider="google",
+        await supabase_update_mailbox_tokens(
+            tenant_id=tenant_id,
+            provider="gmail",
             access_token=new_access_token,
-            scope=data.get("scope"),
+            token_expires_at=data.get("expiry_date"),
         )
 
         return new_access_token
 
 
-async def gmail_get_json_for_user(user_id: str, url: str, params: dict | None = None):
-    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
-    if not oauth:
-        raise HTTPException(status_code=400, detail="Google account not connected")
+async def gmail_get_json_for_context(
+    *,
+    url: str,
+    params: dict | None = None,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+):
+    resolved_tenant_id = await resolve_tenant_id(user_id=user_id, tenant_id=tenant_id)
 
-    access_token = oauth.get("access_token")
-    refresh_token = oauth.get("refresh_token")
+    mailbox = await supabase_get_mailbox_with_tokens(tenant_id=resolved_tenant_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="Google mailbox not connected")
+
+    access_token = mailbox.get("oauth_access_token")
+    refresh_token = mailbox.get("oauth_refresh_token")
 
     if not access_token:
         raise HTTPException(status_code=400, detail="Missing Google access token")
@@ -630,7 +815,7 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict | None = 
 
         if response.status_code == 401 and refresh_token:
             access_token = await refresh_google_access_token(
-                user_id=user_id,
+                tenant_id=resolved_tenant_id,
                 refresh_token=refresh_token,
             )
             response = await client.get(
@@ -647,13 +832,21 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict | None = 
         return data
 
 
-async def gmail_post_json_for_user(user_id: str, url: str, payload: dict):
-    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
-    if not oauth:
-        raise HTTPException(status_code=400, detail="Google account not connected")
+async def gmail_post_json_for_context(
+    *,
+    url: str,
+    payload: dict,
+    user_id: str | None = None,
+    tenant_id: str | None = None,
+):
+    resolved_tenant_id = await resolve_tenant_id(user_id=user_id, tenant_id=tenant_id)
 
-    access_token = oauth.get("access_token")
-    refresh_token = oauth.get("refresh_token")
+    mailbox = await supabase_get_mailbox_with_tokens(tenant_id=resolved_tenant_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="Google mailbox not connected")
+
+    access_token = mailbox.get("oauth_access_token")
+    refresh_token = mailbox.get("oauth_refresh_token")
 
     if not access_token:
         raise HTTPException(status_code=400, detail="Missing Google access token")
@@ -670,7 +863,7 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict):
 
         if response.status_code == 401 and refresh_token:
             access_token = await refresh_google_access_token(
-                user_id=user_id,
+                tenant_id=resolved_tenant_id,
                 refresh_token=refresh_token,
             )
             response = await client.post(
@@ -689,6 +882,68 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict):
 
         return data
 
+
+# Backward-compatible wrappers
+async def gmail_get_json_for_user(user_id: str, url: str, params: dict | None = None):
+    return await gmail_get_json_for_context(url=url, params=params, user_id=user_id)
+
+
+async def gmail_post_json_for_user(user_id: str, url: str, payload: dict):
+    return await gmail_post_json_for_context(url=url, payload=payload, user_id=user_id)
+
+
+# ----------------------------
+# Labels
+# ----------------------------
+
+async def setup_gmail_labels_for_tenant(tenant_id: str):
+    existing = await gmail_get_json_for_context(
+        tenant_id=tenant_id,
+        url=f"{GMAIL_API_BASE}/labels",
+    )
+
+    existing_map = {
+        label["name"]: label["id"]
+        for label in existing.get("labels", [])
+    }
+
+    results = []
+
+    for label_name in OFFICEFLOW_LABELS:
+        if label_name in existing_map:
+            label_id = existing_map[label_name]
+        else:
+            created = await gmail_post_json_for_context(
+                tenant_id=tenant_id,
+                url=f"{GMAIL_API_BASE}/labels",
+                payload={
+                    "name": label_name,
+                    "labelListVisibility": "labelShow",
+                    "messageListVisibility": "show",
+                },
+            )
+            label_id = created["id"]
+
+        saved = await supabase_upsert_gmail_label(
+            tenant_id=tenant_id,
+            label_name=label_name,
+            label_id=label_id,
+        )
+
+        results.append(
+            {
+                "label_name": label_name,
+                "label_id": label_id,
+                "db_row": saved,
+            }
+        )
+
+    return results
+
+
+# ----------------------------
+# AI
+# ----------------------------
 
 async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None) -> str:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
@@ -738,6 +993,10 @@ E-mail:
 
         return data["choices"][0]["message"]["content"]
 
+
+# ----------------------------
+# Routes
+# ----------------------------
 
 @app.get("/")
 def home():
@@ -1127,6 +1386,32 @@ async def gmail_draft_route(
         "gmail_draft_id": gmail_draft_id,
         "draft": draft_result,
         "saved_draft": saved_draft,
+    }
+
+
+@app.post("/internal/setup-labels")
+async def setup_labels(
+    tenant_id: str | None = Body(default=None),
+):
+    resolved_tenant_id = tenant_id or LABEL_SETUP_TENANT_ID
+
+    if not resolved_tenant_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Missing tenant_id. Pass it in the request body or set LABEL_SETUP_TENANT_ID "
+                "in your environment."
+            ),
+        )
+
+    result = await setup_gmail_labels_for_tenant(
+        tenant_id=resolved_tenant_id,
+    )
+
+    return {
+        "status": "ok",
+        "tenant_id": resolved_tenant_id,
+        "labels": result,
     }
 
 
