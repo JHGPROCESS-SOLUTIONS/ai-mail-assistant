@@ -127,10 +127,6 @@ def build_pricing_redirect(reason: str) -> str:
     return f"{FRONTEND_PRICING_URL}?reason={quote(reason)}"
 
 
-# ----------------------------
-# Supabase helpers
-# ----------------------------
-
 def supabase_headers() -> dict:
     service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
     return {
@@ -139,54 +135,153 @@ def supabase_headers() -> dict:
     }
 
 
-async def supabase_get_mailbox_by_address(email: str, provider: str = "gmail"):
+async def supabase_get(
+    path_and_query: str,
+    *,
+    timeout: float = 30.0,
+):
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.get(
-            (
-                f"{supabase_url}/rest/v1/mailboxes"
-                f"?address=eq.{quote(email, safe='')}"
-                f"&provider=eq.{quote(provider, safe='')}"
-                f"&select=*"
-            ),
+            f"{supabase_url}{path_and_query}",
             headers=supabase_headers(),
         )
 
-        data = response.json()
+    data = response.json()
 
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase mailbox lookup failed: {data}")
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase GET failed: {data}")
 
-        if isinstance(data, list) and data:
-            return data[0]
+    return data
 
-        return None
+
+async def supabase_post(
+    path_and_query: str,
+    payload,
+    *,
+    prefer: str = "return=representation",
+    timeout: float = 30.0,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+
+    headers = supabase_headers()
+    headers["Content-Type"] = "application/json"
+    headers["Prefer"] = prefer
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{supabase_url}{path_and_query}",
+            headers=headers,
+            json=payload,
+        )
+
+    data = response.json()
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase POST failed: {data}")
+
+    return data
+
+
+async def supabase_patch(
+    path_and_query: str,
+    payload,
+    *,
+    prefer: str = "return=representation",
+    timeout: float = 30.0,
+):
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+
+    headers = supabase_headers()
+    headers["Content-Type"] = "application/json"
+    headers["Prefer"] = prefer
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.patch(
+            f"{supabase_url}{path_and_query}",
+            headers=headers,
+            json=payload,
+        )
+
+    data = response.json()
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase PATCH failed: {data}")
+
+    return data
+
+
+# ----------------------------
+# Supabase mailbox helpers
+# ----------------------------
+
+async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
+    """
+    Probeert eerst op 'address', en valt terug op 'email_address' als die kolom in
+    een andere omgeving/schema gebruikt wordt.
+    """
+    encoded_email = quote(email, safe="")
+    encoded_provider = quote(provider, safe="")
+
+    queries = [
+        (
+            "/rest/v1/mailboxes"
+            f"?address=eq.{encoded_email}"
+            f"&provider=eq.{encoded_provider}"
+            "&select=*"
+        ),
+        (
+            "/rest/v1/mailboxes"
+            f"?email_address=eq.{encoded_email}"
+            f"&provider=eq.{encoded_provider}"
+            "&select=*"
+        ),
+    ]
+
+    last_error = None
+
+    for query in queries:
+        try:
+            data = await supabase_get(query)
+            if isinstance(data, list) and data:
+                return data[0]
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            last_error = exc
+
+            if "column mailboxes.address does not exist" in detail:
+                continue
+            if "column mailboxes.email_address does not exist" in detail:
+                continue
+
+            raise
+
+    if last_error and "does not exist" not in str(last_error.detail):
+        raise last_error
+
+    return None
 
 
 async def supabase_get_mailbox_by_tenant(tenant_id: str, provider: str = "gmail"):
-    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.get(
-            (
-                f"{supabase_url}/rest/v1/mailboxes"
-                f"?tenant_id=eq.{quote(tenant_id, safe='')}"
-                f"&provider=eq.{quote(provider, safe='')}"
-                f"&select=*"
-            ),
-            headers=supabase_headers(),
+    data = await supabase_get(
+        (
+            "/rest/v1/mailboxes"
+            f"?tenant_id=eq.{quote(tenant_id, safe='')}"
+            f"&provider=eq.{quote(provider, safe='')}"
+            "&select=*"
         )
+    )
 
-        data = response.json()
-
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase mailbox lookup failed: {data}")
-
-        if isinstance(data, list) and data:
-            return data[0]
-
+    if not isinstance(data, list) or not data:
         return None
+
+    # Pak liefst een mailbox met access token
+    for row in data:
+        if row.get("oauth_access_token"):
+            return row
+
+    return data[0]
 
 
 async def supabase_update_mailbox_tokens(
@@ -197,8 +292,6 @@ async def supabase_update_mailbox_tokens(
     token_expires_at: str | None = None,
     provider_mailbox_id: str | None = None,
 ):
-    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
-
     payload = {}
 
     if access_token is not None:
@@ -213,23 +306,12 @@ async def supabase_update_mailbox_tokens(
     if not payload:
         return None
 
-    headers = supabase_headers()
-    headers["Content-Type"] = "application/json"
-    headers["Prefer"] = "return=representation"
+    data = await supabase_patch(
+        f"/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}",
+        payload,
+    )
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.patch(
-            f"{supabase_url}/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}",
-            headers=headers,
-            json=payload,
-        )
-
-        data = response.json()
-
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase mailbox update failed: {data}")
-
-        return data[0] if isinstance(data, list) and data else data
+    return data[0] if isinstance(data, list) and data else data
 
 
 async def supabase_upsert_gmail_label(
@@ -237,31 +319,19 @@ async def supabase_upsert_gmail_label(
     label_name: str,
     label_id: str,
 ):
-    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    data = await supabase_post(
+        "/rest/v1/gmail_labels?on_conflict=tenant_id,label_name",
+        [
+            {
+                "tenant_id": tenant_id,
+                "label_name": label_name,
+                "label_id": label_id,
+            }
+        ],
+        prefer="resolution=merge-duplicates,return=representation",
+    )
 
-    headers = supabase_headers()
-    headers["Content-Type"] = "application/json"
-    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{supabase_url}/rest/v1/gmail_labels?on_conflict=tenant_id,label_name",
-            headers=headers,
-            json=[
-                {
-                    "tenant_id": tenant_id,
-                    "label_name": label_name,
-                    "label_id": label_id,
-                }
-            ],
-        )
-
-        data = response.json()
-
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase gmail_labels upsert failed: {data}")
-
-        return data[0] if isinstance(data, list) and data else data
+    return data[0] if isinstance(data, list) and data else data
 
 
 async def supabase_insert_message(
@@ -271,36 +341,21 @@ async def supabase_insert_message(
     thread_id: str | None,
     provider: str = "gmail",
 ):
-    """
-    Schrijft alleen kolommen weg die we zeker uit jouw schema kennen.
-    """
-    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    data = await supabase_post(
+        "/rest/v1/messages?on_conflict=provider,provider_message_id",
+        [
+            {
+                "tenant_id": tenant_id,
+                "mailbox_id": mailbox_id,
+                "provider": provider,
+                "provider_message_id": provider_message_id,
+                "thread_id": thread_id,
+            }
+        ],
+        prefer="resolution=merge-duplicates,return=representation",
+    )
 
-    headers = supabase_headers()
-    headers["Content-Type"] = "application/json"
-    headers["Prefer"] = "resolution=merge-duplicates,return=representation"
-
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{supabase_url}/rest/v1/messages?on_conflict=provider,provider_message_id",
-            headers=headers,
-            json=[
-                {
-                    "tenant_id": tenant_id,
-                    "mailbox_id": mailbox_id,
-                    "provider": provider,
-                    "provider_message_id": provider_message_id,
-                    "thread_id": thread_id,
-                }
-            ],
-        )
-
-        data = response.json()
-
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase messages insert failed: {data}")
-
-        return data[0] if isinstance(data, list) and data else data
+    return data[0] if isinstance(data, list) and data else data
 
 
 async def supabase_insert_mail_draft(
@@ -310,17 +365,6 @@ async def supabase_insert_mail_draft(
     gmail_draft_id: str | None,
     draft_body: str,
 ):
-    """
-    Omdat we jouw exacte kolommen van mail_drafts niet volledig zagen,
-    schrijven we alleen veilige, plausibele velden. Als jouw tabel andere
-    verplichte velden heeft, krijg je daar een expliciete fout op.
-    """
-    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
-
-    headers = supabase_headers()
-    headers["Content-Type"] = "application/json"
-    headers["Prefer"] = "return=representation"
-
     payload = {
         "tenant_id": tenant_id,
         "mailbox_id": mailbox_id,
@@ -331,19 +375,13 @@ async def supabase_insert_mail_draft(
     if message_id:
         payload["message_id"] = message_id
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(
-            f"{supabase_url}/rest/v1/mail_drafts",
-            headers=headers,
-            json=[payload],
-        )
+    data = await supabase_post(
+        "/rest/v1/mail_drafts",
+        [payload],
+        prefer="return=representation",
+    )
 
-        data = response.json()
-
-        if response.status_code >= 400:
-            raise HTTPException(status_code=500, detail=f"Supabase mail_drafts insert failed: {data}")
-
-        return data[0] if isinstance(data, list) and data else data
+    return data[0] if isinstance(data, list) and data else data
 
 
 # ----------------------------
@@ -354,7 +392,7 @@ async def ensure_mailbox_access(email: str):
     if not email:
         raise HTTPException(status_code=401, detail="Missing email")
 
-    mailbox = await supabase_get_mailbox_by_address(email=email, provider="gmail")
+    mailbox = await supabase_get_mailbox_by_email(email=email, provider="gmail")
 
     if not mailbox:
         raise HTTPException(status_code=404, detail="Mailbox not found")
@@ -400,9 +438,10 @@ async def refresh_google_access_token(mailbox: dict):
         await supabase_update_mailbox_tokens(
             mailbox_id=mailbox_id,
             access_token=new_access_token,
-            token_expires_at=data.get("expires_in"),
+            token_expires_at=str(data.get("expires_in")) if data.get("expires_in") is not None else None,
         )
 
+        mailbox["oauth_access_token"] = new_access_token
         return new_access_token
 
 
@@ -632,9 +671,7 @@ def health():
 async def billing_status():
     return JSONResponse(
         status_code=501,
-        content={
-            "detail": "billing/status is not implemented in this schema-specific main.py"
-        },
+        content={"detail": "billing/status is not implemented in this main.py"},
     )
 
 
@@ -693,7 +730,7 @@ async def google_callback(code: str):
     if not user_email:
         raise HTTPException(status_code=400, detail=f"Google userinfo error: {user}")
 
-    mailbox = await supabase_get_mailbox_by_address(user_email, provider="gmail")
+    mailbox = await supabase_get_mailbox_by_email(user_email, provider="gmail")
     if not mailbox:
         return RedirectResponse(
             url=build_pricing_redirect("mailbox_not_preprovisioned"),
@@ -707,6 +744,10 @@ async def google_callback(code: str):
         token_expires_at=str(expires_in) if expires_in is not None else None,
         provider_mailbox_id=google_account_id,
     )
+
+    mailbox["oauth_access_token"] = access_token
+    if refresh_token:
+        mailbox["oauth_refresh_token"] = refresh_token
 
     tenant_id = mailbox["tenant_id"]
 
@@ -943,14 +984,11 @@ async def stripe_webhook(request: Request):
                 content={"error": "Missing Stripe signature header"},
             )
 
-        event = stripe.Webhook.construct_event(
+        stripe.Webhook.construct_event(
             payload=payload,
             sig_header=sig_header,
             secret=webhook_secret,
         )
-
-        event_type = event["type"]
-        print("Stripe webhook received:", event_type)
 
         return {"received": True}
 
