@@ -374,15 +374,6 @@ async def ensure_mailbox_access(email: str):
 
     tenant_id = mailbox.get("tenant_id")
 
-    if not tenant_id and mailbox.get("id"):
-        mailbox_id = quote(str(mailbox["id"]), safe="")
-        refetch = await supabase_get(
-            f"/rest/v1/mailboxes?id=eq.{mailbox_id}&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
-        )
-        if isinstance(refetch, list) and refetch:
-            mailbox = refetch[0]
-            tenant_id = mailbox.get("tenant_id")
-
     if not tenant_id:
         raise HTTPException(
             status_code=400,
