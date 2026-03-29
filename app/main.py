@@ -225,13 +225,13 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
             "/rest/v1/mailboxes"
             f"?address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
+            "&select=id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
         ),
         (
             "/rest/v1/mailboxes"
             f"?email_address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=id,tenant_id,provider,email_address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
+            "&select=id,provider,email_address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
         ),
     ]
 
@@ -257,6 +257,18 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
         raise last_error
 
     return None
+
+
+async def supabase_try_get_mailbox_tenant_id(mailbox_id: str) -> str | None:
+    try:
+        data = await supabase_get(
+            f"/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}&select=id,tenant_id"
+        )
+        if isinstance(data, list) and data:
+            return data[0].get("tenant_id")
+        return None
+    except HTTPException:
+        return None
 
 
 async def supabase_update_mailbox_tokens(
@@ -372,13 +384,8 @@ async def ensure_mailbox_access(email: str):
     if not mailbox:
         raise HTTPException(status_code=404, detail="Mailbox not found")
 
-    tenant_id = mailbox.get("tenant_id")
-
-    if not tenant_id:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Mailbox exists but tenant_id is missing. Mailbox row: {mailbox}",
-        )
+    tenant_id = await supabase_try_get_mailbox_tenant_id(str(mailbox["id"]))
+    mailbox["tenant_id"] = tenant_id
 
     return mailbox
 
@@ -504,8 +511,6 @@ async def gmail_post_json_for_mailbox(
 
 async def setup_gmail_labels_for_mailbox(mailbox: dict):
     tenant_id = mailbox.get("tenant_id")
-    if not tenant_id:
-        raise HTTPException(status_code=400, detail="Mailbox tenant_id missing for label setup")
 
     existing = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
@@ -534,11 +539,16 @@ async def setup_gmail_labels_for_mailbox(mailbox: dict):
             )
             label_id = created["id"]
 
-        saved = await supabase_upsert_gmail_label(
-            tenant_id=tenant_id,
-            label_name=label_name,
-            label_id=label_id,
-        )
+        saved = None
+        if tenant_id:
+            try:
+                saved = await supabase_upsert_gmail_label(
+                    tenant_id=tenant_id,
+                    label_name=label_name,
+                    label_id=label_id,
+                )
+            except Exception:
+                saved = None
 
         results.append(
             {
@@ -729,7 +739,7 @@ async def google_callback(code: str):
         mailbox["oauth_refresh_token"] = refresh_token
 
     mailbox = await ensure_mailbox_access(user_email)
-    tenant_id = mailbox["tenant_id"]
+    tenant_id = mailbox.get("tenant_id")
 
     gmail_response = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
@@ -762,16 +772,17 @@ async def google_callback(code: str):
     to_email = extract_email_address(sender)
 
     message_row = None
-    try:
-        message_row = await supabase_insert_message(
-            tenant_id=tenant_id,
-            mailbox_id=mailbox["id"],
-            provider_message_id=first_message_id,
-            thread_id=first_thread_id,
-            provider="gmail",
-        )
-    except Exception:
-        message_row = None
+    if tenant_id:
+        try:
+            message_row = await supabase_insert_message(
+                tenant_id=tenant_id,
+                mailbox_id=mailbox["id"],
+                provider_message_id=first_message_id,
+                thread_id=first_thread_id,
+                provider="gmail",
+            )
+        except Exception:
+            message_row = None
 
     ai_reply = await generate_ai_reply(
         subject=subject,
@@ -793,16 +804,17 @@ async def google_callback(code: str):
 
         gmail_draft_id = draft_result.get("id")
 
-        try:
-            await supabase_insert_mail_draft(
-                tenant_id=tenant_id,
-                mailbox_id=mailbox["id"],
-                message_id=message_row["id"] if message_row else None,
-                gmail_draft_id=gmail_draft_id,
-                draft_body=ai_reply,
-            )
-        except Exception:
-            pass
+        if tenant_id:
+            try:
+                await supabase_insert_mail_draft(
+                    tenant_id=tenant_id,
+                    mailbox_id=mailbox["id"],
+                    message_id=message_row["id"] if message_row else None,
+                    gmail_draft_id=gmail_draft_id,
+                    draft_body=ai_reply,
+                )
+            except Exception:
+                pass
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
@@ -812,7 +824,7 @@ async def test_protected(email: str):
     mailbox = await ensure_mailbox_access(email)
     return {
         "status": "allowed",
-        "tenant_id": mailbox["tenant_id"],
+        "tenant_id": mailbox.get("tenant_id"),
         "mailbox_id": mailbox["id"],
     }
 
@@ -823,7 +835,7 @@ async def test_protected_ui(email: str):
     return {
         "status": "allowed",
         "email": email,
-        "tenant_id": mailbox["tenant_id"],
+        "tenant_id": mailbox.get("tenant_id"),
         "mailbox_id": mailbox["id"],
         "message": "Protected route accessible",
     }
@@ -938,13 +950,12 @@ async def gmail_draft_route(
 @app.post("/internal/setup-labels")
 async def setup_labels(email: str = Body(...)):
     mailbox = await ensure_mailbox_access(email)
-    tenant_id = mailbox["tenant_id"]
 
     result = await setup_gmail_labels_for_mailbox(mailbox)
 
     return {
         "status": "ok",
-        "tenant_id": tenant_id,
+        "tenant_id": mailbox.get("tenant_id"),
         "mailbox_id": mailbox["id"],
         "labels": result,
     }
