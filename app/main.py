@@ -217,10 +217,6 @@ async def supabase_patch(
 # ----------------------------
 
 async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
-    """
-    Probeert eerst op 'address', en valt terug op 'email_address' als die kolom in
-    een andere omgeving/schema gebruikt wordt.
-    """
     encoded_email = quote(email, safe="")
     encoded_provider = quote(provider, safe="")
 
@@ -229,13 +225,13 @@ async def supabase_get_mailbox_by_email(email: str, provider: str = "gmail"):
             "/rest/v1/mailboxes"
             f"?address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=*"
+            "&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
         ),
         (
             "/rest/v1/mailboxes"
             f"?email_address=eq.{encoded_email}"
             f"&provider=eq.{encoded_provider}"
-            "&select=*"
+            "&select=id,tenant_id,provider,email_address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
         ),
     ]
 
@@ -269,14 +265,13 @@ async def supabase_get_mailbox_by_tenant(tenant_id: str, provider: str = "gmail"
             "/rest/v1/mailboxes"
             f"?tenant_id=eq.{quote(tenant_id, safe='')}"
             f"&provider=eq.{quote(provider, safe='')}"
-            "&select=*"
+            "&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
         )
     )
 
     if not isinstance(data, list) or not data:
         return None
 
-    # Pak liefst een mailbox met access token
     for row in data:
         if row.get("oauth_access_token"):
             return row
@@ -398,8 +393,21 @@ async def ensure_mailbox_access(email: str):
         raise HTTPException(status_code=404, detail="Mailbox not found")
 
     tenant_id = mailbox.get("tenant_id")
+
+    if not tenant_id and mailbox.get("id"):
+        mailbox_id = quote(str(mailbox["id"]), safe="")
+        refetch = await supabase_get(
+            f"/rest/v1/mailboxes?id=eq.{mailbox_id}&select=id,tenant_id,provider,address,oauth_access_token,oauth_refresh_token,oauth_token_expires_at,provider_mailbox_id,provider_status"
+        )
+        if isinstance(refetch, list) and refetch:
+            mailbox = refetch[0]
+            tenant_id = mailbox.get("tenant_id")
+
     if not tenant_id:
-        raise HTTPException(status_code=400, detail="Mailbox exists but tenant_id is missing")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mailbox exists but tenant_id is missing. Mailbox row: {mailbox}",
+        )
 
     return mailbox
 
@@ -749,7 +757,12 @@ async def google_callback(code: str):
     if refresh_token:
         mailbox["oauth_refresh_token"] = refresh_token
 
-    tenant_id = mailbox["tenant_id"]
+    tenant_id = mailbox.get("tenant_id")
+
+    if not tenant_id:
+        refetched_mailbox = await ensure_mailbox_access(user_email)
+        mailbox = refetched_mailbox
+        tenant_id = mailbox["tenant_id"]
 
     gmail_response = await gmail_get_json_for_mailbox(
         mailbox=mailbox,
