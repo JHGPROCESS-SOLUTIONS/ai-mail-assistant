@@ -954,18 +954,13 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
             label_id = label_obj["id"]
 
             if color:
-                await gmail_patch_json_for_user(
+                await update_gmail_label_color(
                     user_id=user_id,
-                    url=f"{GMAIL_API_BASE}/labels/{label_id}",
-                    payload={
-                        "color": {
-                            "textColor": color["textColor"],
-                            "backgroundColor": color["backgroundColor"],
-                        }
-                    },
+                    label_id=label_id,
+                    label_name=label_name,
                 )
         else:
-            payload = {
+            payload: dict[str, Any] = {
                 "name": label_name,
                 "labelListVisibility": "labelShow",
                 "messageListVisibility": "show",
@@ -1138,6 +1133,189 @@ E-mail:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {data}")
 
     return data["choices"][0]["message"]["content"]
+
+
+# ----------------------------
+# Processing engine
+# ----------------------------
+
+async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str, Any]:
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    mailbox = context["mailbox"]
+
+    if max_results < 1:
+        max_results = 1
+    if max_results > 20:
+        max_results = 20
+
+    await setup_gmail_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
+
+    labels_response = await gmail_get_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/labels",
+    )
+    label_name_to_id = {
+        label["name"]: label["id"]
+        for label in labels_response.get("labels", [])
+    }
+
+    officeflow_label_ids = {
+        label_id
+        for label_name, label_id in label_name_to_id.items()
+        if label_name.startswith("OfficeFlow/")
+    }
+
+    gmail_data = await gmail_get_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/messages",
+        params={
+            "maxResults": max_results,
+            "labelIds": "INBOX",
+        },
+    )
+
+    messages = gmail_data.get("messages", [])
+    results: list[dict[str, Any]] = []
+
+    for message in messages:
+        message_id = message.get("id")
+        if not message_id:
+            continue
+
+        message_data = await gmail_get_json_for_user(
+            user_id=user["id"],
+            url=f"{GMAIL_API_BASE}/messages/{message_id}",
+        )
+
+        payload = message_data.get("payload", {})
+        headers = payload.get("headers", [])
+
+        from_header = get_header_value(headers, "From")
+        subject = get_header_value(headers, "Subject")
+        body_text = extract_plain_text_from_payload(payload)
+        original_message_id_header = get_header_value(headers, "Message-ID")
+        references_header = get_header_value(headers, "References")
+        thread_id = message_data.get("threadId")
+
+        email_row = await supabase_insert_email(
+            user_id=user["id"],
+            mailbox_id=mailbox["id"],
+            gmail_message_id=message_id,
+            gmail_thread_id=thread_id,
+            subject=subject,
+        )
+
+        classification = await classify_email(
+            subject=subject,
+            sender=from_header,
+            body_text=body_text,
+        )
+
+        officeflow_label_name = classification["label"]
+        officeflow_label_id = label_name_to_id.get(officeflow_label_name)
+
+        current_label_ids = set(message_data.get("labelIds", []))
+        has_any_officeflow_label = any(label_id in current_label_ids for label_id in officeflow_label_ids)
+
+        if officeflow_label_id and officeflow_label_id not in current_label_ids:
+            await apply_gmail_label_to_message(
+                user_id=user["id"],
+                gmail_message_id=message_id,
+                label_id=officeflow_label_id,
+            )
+
+            message_data = await gmail_get_json_for_user(
+                user_id=user["id"],
+                url=f"{GMAIL_API_BASE}/messages/{message_id}",
+            )
+            current_label_ids = set(message_data.get("labelIds", []))
+
+        is_marketing = "CATEGORY_PROMOTIONS" in current_label_ids
+        is_social = "CATEGORY_SOCIAL" in current_label_ids
+        is_updates = "CATEGORY_UPDATES" in current_label_ids
+
+        should_generate_draft = (
+            classification["generate_draft"]
+            and not is_marketing
+            and not is_social
+            and not is_updates
+        )
+
+        draft_created = False
+        gmail_draft_id = None
+
+        if should_generate_draft and email_row:
+            existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
+
+            if not existing_drafts:
+                ai_reply = await generate_ai_reply(
+                    subject=subject,
+                    sender=from_header,
+                    body_text=body_text,
+                )
+
+                to_email = extract_email_address(from_header)
+
+                if to_email and ai_reply:
+                    draft_result = await create_gmail_threaded_draft(
+                        user_id=user["id"],
+                        to_email=to_email,
+                        subject=subject,
+                        body=ai_reply,
+                        thread_id=thread_id,
+                        original_message_id_header=original_message_id_header,
+                        references_header=references_header,
+                    )
+
+                    gmail_draft_id = draft_result.get("id")
+
+                    if gmail_draft_id:
+                        await supabase_insert_draft(
+                            user_id=user["id"],
+                            email_id=email_row["id"],
+                            gmail_draft_id=gmail_draft_id,
+                            subject=subject,
+                            draft_body=ai_reply,
+                            status="generated",
+                        )
+                        draft_created = True
+
+                        await supabase_upsert_onboarding_state(
+                            user_id=user["id"],
+                            gmail_connected=True,
+                            profile_completed=True,
+                            initial_sync_completed=False,
+                            first_draft_generated=True,
+                        )
+
+        results.append(
+            {
+                "gmail_message_id": message_data.get("id"),
+                "gmail_thread_id": message_data.get("threadId"),
+                "subject": subject,
+                "from_name": from_header,
+                "from_email": extract_email_address(from_header),
+                "snippet": message_data.get("snippet"),
+                "body_text": body_text[:500] if body_text else None,
+                "label_ids": list(current_label_ids),
+                "officeflow_label": officeflow_label_name,
+                "generate_draft": should_generate_draft,
+                "classification_reason": classification["reason"],
+                "draft_created": draft_created,
+                "gmail_draft_id": gmail_draft_id,
+                "already_had_officeflow_label": has_any_officeflow_label,
+            }
+        )
+
+    return {
+        "status": "ok",
+        "count": len(results),
+        "messages": results,
+    }
 
 
 # ----------------------------
@@ -1495,181 +1673,21 @@ async def gmail_classify_route(
 
 @app.get("/gmail/inbox")
 async def gmail_inbox(email: str, max_results: int = 10):
-    context = await get_gmail_context_by_email(email)
-    user = context["user"]
-    mailbox = context["mailbox"]
+    return await process_inbox_for_user(email=email, max_results=max_results)
 
-    if max_results < 1:
-        max_results = 1
-    if max_results > 20:
-        max_results = 20
 
-    await setup_gmail_labels_for_mailbox(
-        user_id=user["id"],
-        mailbox_id=mailbox["id"],
-    )
-
-    labels_response = await gmail_get_json_for_user(
-        user_id=user["id"],
-        url=f"{GMAIL_API_BASE}/labels",
-    )
-    label_name_to_id = {
-        label["name"]: label["id"]
-        for label in labels_response.get("labels", [])
-    }
-
-    officeflow_label_ids = {
-        label_id
-        for label_name, label_id in label_name_to_id.items()
-        if label_name.startswith("OfficeFlow/")
-    }
-
-    gmail_data = await gmail_get_json_for_user(
-        user_id=user["id"],
-        url=f"{GMAIL_API_BASE}/messages",
-        params={
-            "maxResults": max_results,
-            "labelIds": "INBOX",
-        },
-    )
-
-    messages = gmail_data.get("messages", [])
-    results: list[dict[str, Any]] = []
-
-    for message in messages:
-        message_id = message.get("id")
-        if not message_id:
-            continue
-
-        message_data = await gmail_get_json_for_user(
-            user_id=user["id"],
-            url=f"{GMAIL_API_BASE}/messages/{message_id}",
-        )
-
-        payload = message_data.get("payload", {})
-        headers = payload.get("headers", [])
-
-        from_header = get_header_value(headers, "From")
-        subject = get_header_value(headers, "Subject")
-        body_text = extract_plain_text_from_payload(payload)
-        original_message_id_header = get_header_value(headers, "Message-ID")
-        references_header = get_header_value(headers, "References")
-        thread_id = message_data.get("threadId")
-
-        email_row = await supabase_insert_email(
-            user_id=user["id"],
-            mailbox_id=mailbox["id"],
-            gmail_message_id=message_id,
-            gmail_thread_id=thread_id,
-            subject=subject,
-        )
-
-        classification = await classify_email(
-            subject=subject,
-            sender=from_header,
-            body_text=body_text,
-        )
-
-        officeflow_label_name = classification["label"]
-        officeflow_label_id = label_name_to_id.get(officeflow_label_name)
-
-        current_label_ids = set(message_data.get("labelIds", []))
-        has_any_officeflow_label = any(label_id in current_label_ids for label_id in officeflow_label_ids)
-
-        if officeflow_label_id and officeflow_label_id not in current_label_ids:
-            await apply_gmail_label_to_message(
-                user_id=user["id"],
-                gmail_message_id=message_id,
-                label_id=officeflow_label_id,
-            )
-
-            message_data = await gmail_get_json_for_user(
-                user_id=user["id"],
-                url=f"{GMAIL_API_BASE}/messages/{message_id}",
-            )
-            current_label_ids = set(message_data.get("labelIds", []))
-
-        is_marketing = "CATEGORY_PROMOTIONS" in current_label_ids
-        is_social = "CATEGORY_SOCIAL" in current_label_ids
-        is_updates = "CATEGORY_UPDATES" in current_label_ids
-
-        should_generate_draft = (
-            classification["generate_draft"]
-            and not is_marketing
-            and not is_social
-            and not is_updates
-        )
-
-        draft_created = False
-        gmail_draft_id = None
-
-        if should_generate_draft and email_row:
-            existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
-
-            if not existing_drafts:
-                ai_reply = await generate_ai_reply(
-                    subject=subject,
-                    sender=from_header,
-                    body_text=body_text,
-                )
-
-                to_email = extract_email_address(from_header)
-
-                if to_email and ai_reply:
-                    draft_result = await create_gmail_threaded_draft(
-                        user_id=user["id"],
-                        to_email=to_email,
-                        subject=subject,
-                        body=ai_reply,
-                        thread_id=thread_id,
-                        original_message_id_header=original_message_id_header,
-                        references_header=references_header,
-                    )
-
-                    gmail_draft_id = draft_result.get("id")
-
-                    if gmail_draft_id:
-                        await supabase_insert_draft(
-                            user_id=user["id"],
-                            email_id=email_row["id"],
-                            gmail_draft_id=gmail_draft_id,
-                            subject=subject,
-                            draft_body=ai_reply,
-                            status="generated",
-                        )
-                        draft_created = True
-
-                        await supabase_upsert_onboarding_state(
-                            user_id=user["id"],
-                            gmail_connected=True,
-                            profile_completed=True,
-                            initial_sync_completed=False,
-                            first_draft_generated=True,
-                        )
-
-        results.append(
-            {
-                "gmail_message_id": message_data.get("id"),
-                "gmail_thread_id": message_data.get("threadId"),
-                "subject": subject,
-                "from_name": from_header,
-                "from_email": extract_email_address(from_header),
-                "snippet": message_data.get("snippet"),
-                "body_text": body_text[:500] if body_text else None,
-                "label_ids": list(current_label_ids),
-                "officeflow_label": officeflow_label_name,
-                "generate_draft": should_generate_draft,
-                "classification_reason": classification["reason"],
-                "draft_created": draft_created,
-                "gmail_draft_id": gmail_draft_id,
-                "already_had_officeflow_label": has_any_officeflow_label,
-            }
-        )
+@app.post("/internal/process-inbox")
+async def process_inbox_route(
+    email: str = Body(...),
+    max_results: int = Body(default=10),
+):
+    result = await process_inbox_for_user(email=email, max_results=max_results)
 
     return {
         "status": "ok",
-        "count": len(results),
-        "messages": results,
+        "processed_email": email,
+        "count": result["count"],
+        "messages": result["messages"],
     }
 
 
