@@ -78,6 +78,35 @@ LABEL_RULES = {
     "OfficeFlow/Spam": {"generate_draft": False},
 }
 
+# Gmail only accepts predefined label colors. These values are from the Gmail API's
+# allowed color set. :contentReference[oaicite:1]{index=1}
+LABEL_COLORS = {
+    "OfficeFlow/Priority": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#d14836",
+    },
+    "OfficeFlow/To Respond": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#4a86e8",
+    },
+    "OfficeFlow/FYI": {
+        "textColor": "#000000",
+        "backgroundColor": "#f3f3f3",
+    },
+    "OfficeFlow/Notification": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#8e63ce",
+    },
+    "OfficeFlow/Marketing": {
+        "textColor": "#000000",
+        "backgroundColor": "#fad165",
+    },
+    "OfficeFlow/Spam": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#cc3a21",
+    },
+}
+
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -545,6 +574,13 @@ async def supabase_insert_email(
     return data[0] if isinstance(data, list) and data else data
 
 
+async def supabase_get_drafts_by_email_id(email_id: str) -> list[dict[str, Any]]:
+    data = await supabase_get(
+        f"/rest/v1/drafts?email_id=eq.{quote(email_id, safe='')}&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
 async def supabase_insert_draft(
     user_id: str,
     email_id: str,
@@ -743,6 +779,50 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
     return data
 
 
+async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, Any]) -> Any:
+    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
+
+    if not oauth:
+        raise HTTPException(status_code=400, detail="Google account not connected")
+
+    access_token = oauth.get("access_token")
+    refresh_token = oauth.get("refresh_token")
+
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Missing Google access token")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.patch(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
+        if response.status_code == 401 and refresh_token:
+            access_token = await refresh_google_access_token(
+                user_id=user_id,
+                refresh_token=refresh_token,
+            )
+            response = await client.patch(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+    data = parse_response_data(response)
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
+
+    return data
+
+
 async def get_gmail_label_id_by_name(user_id: str, label_name: str) -> str | None:
     labels_response = await gmail_get_json_for_user(
         user_id=user_id,
@@ -766,6 +846,23 @@ async def apply_gmail_label_to_message(user_id: str, gmail_message_id: str, labe
     )
 
 
+async def update_gmail_label_color(user_id: str, label_id: str, label_name: str) -> Any:
+    color = LABEL_COLORS.get(label_name)
+    if not color:
+        return None
+
+    return await gmail_patch_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/labels/{label_id}",
+        payload={
+            "color": {
+                "textColor": color["textColor"],
+                "backgroundColor": color["backgroundColor"],
+            }
+        },
+    )
+
+
 # ----------------------------
 # Labels
 # ----------------------------
@@ -777,7 +874,7 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
     )
 
     existing_map = {
-        label["name"]: label["id"]
+        label["name"]: label
         for label in existing.get("labels", [])
     }
 
@@ -785,8 +882,11 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
 
     for label_name in OFFICEFLOW_LABELS:
         if label_name in existing_map:
-            label_id = existing_map[label_name]
+            label_obj = existing_map[label_name]
+            label_id = label_obj["id"]
+            await update_gmail_label_color(user_id=user_id, label_id=label_id, label_name=label_name)
         else:
+            color = LABEL_COLORS.get(label_name, {})
             created = await gmail_post_json_for_user(
                 user_id=user_id,
                 url=f"{GMAIL_API_BASE}/labels",
@@ -794,6 +894,10 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
                     "name": label_name,
                     "labelListVisibility": "labelShow",
                     "messageListVisibility": "show",
+                    "color": {
+                        "textColor": color.get("textColor", "#000000"),
+                        "backgroundColor": color.get("backgroundColor", "#f3f3f3"),
+                    },
                 },
             )
             label_id = created["id"]
@@ -1188,49 +1292,52 @@ async def google_callback(code: str):
     gmail_label_ids = first_email.get("labelIds", [])
     is_marketing = "CATEGORY_PROMOTIONS" in gmail_label_ids
     is_social = "CATEGORY_SOCIAL" in gmail_label_ids
+    is_updates = "CATEGORY_UPDATES" in gmail_label_ids
 
-    should_generate_draft = generate_draft and not is_marketing and not is_social
+    should_generate_draft = generate_draft and not is_marketing and not is_social and not is_updates
 
     if should_generate_draft and email_row:
-        ai_reply = await generate_ai_reply(
-            subject=subject,
-            sender=sender,
-            body_text=body_text,
-        )
-
-        to_email = extract_email_address(sender)
-
-        if to_email and ai_reply:
-            message = MIMEText(ai_reply)
-            message["to"] = to_email
-            message["subject"] = f"Re: {subject}" if subject else "Re:"
-            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-            draft_result = await gmail_post_json_for_user(
-                user_id=user_id,
-                url=f"{GMAIL_API_BASE}/drafts",
-                payload={"message": {"raw": raw_message}},
+        existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
+        if not existing_drafts:
+            ai_reply = await generate_ai_reply(
+                subject=subject,
+                sender=sender,
+                body_text=body_text,
             )
 
-            gmail_draft_id = draft_result.get("id")
+            to_email = extract_email_address(sender)
 
-            if gmail_draft_id:
-                await supabase_insert_draft(
+            if to_email and ai_reply:
+                message = MIMEText(ai_reply)
+                message["to"] = to_email
+                message["subject"] = f"Re: {subject}" if subject else "Re:"
+                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+                draft_result = await gmail_post_json_for_user(
                     user_id=user_id,
-                    email_id=email_row["id"],
-                    gmail_draft_id=gmail_draft_id,
-                    subject=subject,
-                    draft_body=ai_reply,
-                    status="generated",
+                    url=f"{GMAIL_API_BASE}/drafts",
+                    payload={"message": {"raw": raw_message}},
                 )
 
-                await supabase_upsert_onboarding_state(
-                    user_id=user_id,
-                    gmail_connected=True,
-                    profile_completed=True,
-                    initial_sync_completed=False,
-                    first_draft_generated=True,
-                )
+                gmail_draft_id = draft_result.get("id")
+
+                if gmail_draft_id:
+                    await supabase_insert_draft(
+                        user_id=user_id,
+                        email_id=email_row["id"],
+                        gmail_draft_id=gmail_draft_id,
+                        subject=subject,
+                        draft_body=ai_reply,
+                        status="generated",
+                    )
+
+                    await supabase_upsert_onboarding_state(
+                        user_id=user_id,
+                        gmail_connected=True,
+                        profile_completed=True,
+                        initial_sync_completed=False,
+                        first_draft_generated=True,
+                    )
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
@@ -1328,6 +1435,12 @@ async def gmail_inbox(email: str, max_results: int = 10):
         for label in labels_response.get("labels", [])
     }
 
+    officeflow_label_ids = {
+        label_id
+        for label_name, label_id in label_name_to_id.items()
+        if label_name.startswith("OfficeFlow/")
+    }
+
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
         url=f"{GMAIL_API_BASE}/messages",
@@ -1357,6 +1470,14 @@ async def gmail_inbox(email: str, max_results: int = 10):
         subject = get_header_value(headers, "Subject")
         body_text = extract_plain_text_from_payload(payload)
 
+        email_row = await supabase_insert_email(
+            user_id=user["id"],
+            mailbox_id=mailbox["id"],
+            gmail_message_id=message_id,
+            gmail_thread_id=message_data.get("threadId"),
+            subject=subject,
+        )
+
         classification = await classify_email(
             subject=subject,
             sender=from_header,
@@ -1366,7 +1487,10 @@ async def gmail_inbox(email: str, max_results: int = 10):
         officeflow_label_name = classification["label"]
         officeflow_label_id = label_name_to_id.get(officeflow_label_name)
 
-        if officeflow_label_id:
+        current_label_ids = set(message_data.get("labelIds", []))
+        has_any_officeflow_label = any(label_id in current_label_ids for label_id in officeflow_label_ids)
+
+        if officeflow_label_id and officeflow_label_id not in current_label_ids:
             await apply_gmail_label_to_message(
                 user_id=user["id"],
                 gmail_message_id=message_id,
@@ -1377,6 +1501,66 @@ async def gmail_inbox(email: str, max_results: int = 10):
                 user_id=user["id"],
                 url=f"{GMAIL_API_BASE}/messages/{message_id}",
             )
+            current_label_ids = set(message_data.get("labelIds", []))
+
+        is_marketing = "CATEGORY_PROMOTIONS" in current_label_ids
+        is_social = "CATEGORY_SOCIAL" in current_label_ids
+        is_updates = "CATEGORY_UPDATES" in current_label_ids
+
+        should_generate_draft = (
+            classification["generate_draft"]
+            and not is_marketing
+            and not is_social
+            and not is_updates
+        )
+
+        draft_created = False
+        gmail_draft_id = None
+
+        if should_generate_draft and email_row:
+            existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
+
+            if not existing_drafts:
+                ai_reply = await generate_ai_reply(
+                    subject=subject,
+                    sender=from_header,
+                    body_text=body_text,
+                )
+
+                to_email = extract_email_address(from_header)
+
+                if to_email and ai_reply:
+                    draft_message = MIMEText(ai_reply)
+                    draft_message["to"] = to_email
+                    draft_message["subject"] = f"Re: {subject}" if subject else "Re:"
+                    raw_message = base64.urlsafe_b64encode(draft_message.as_bytes()).decode()
+
+                    draft_result = await gmail_post_json_for_user(
+                        user_id=user["id"],
+                        url=f"{GMAIL_API_BASE}/drafts",
+                        payload={"message": {"raw": raw_message}},
+                    )
+
+                    gmail_draft_id = draft_result.get("id")
+
+                    if gmail_draft_id:
+                        await supabase_insert_draft(
+                            user_id=user["id"],
+                            email_id=email_row["id"],
+                            gmail_draft_id=gmail_draft_id,
+                            subject=subject,
+                            draft_body=ai_reply,
+                            status="generated",
+                        )
+                        draft_created = True
+
+                        await supabase_upsert_onboarding_state(
+                            user_id=user["id"],
+                            gmail_connected=True,
+                            profile_completed=True,
+                            initial_sync_completed=False,
+                            first_draft_generated=True,
+                        )
 
         results.append(
             {
@@ -1387,10 +1571,13 @@ async def gmail_inbox(email: str, max_results: int = 10):
                 "from_email": extract_email_address(from_header),
                 "snippet": message_data.get("snippet"),
                 "body_text": body_text[:500] if body_text else None,
-                "label_ids": message_data.get("labelIds", []),
+                "label_ids": list(current_label_ids),
                 "officeflow_label": officeflow_label_name,
-                "generate_draft": classification["generate_draft"],
+                "generate_draft": should_generate_draft,
                 "classification_reason": classification["reason"],
+                "draft_created": draft_created,
+                "gmail_draft_id": gmail_draft_id,
+                "already_had_officeflow_label": has_any_officeflow_label,
             }
         )
 
