@@ -1185,7 +1185,13 @@ async def google_callback(code: str):
             label_id=label_id,
         )
 
-    if generate_draft and email_row:
+    gmail_label_ids = first_email.get("labelIds", [])
+    is_marketing = "CATEGORY_PROMOTIONS" in gmail_label_ids
+    is_social = "CATEGORY_SOCIAL" in gmail_label_ids
+
+    should_generate_draft = generate_draft and not is_marketing and not is_social
+
+    if should_generate_draft and email_row:
         ai_reply = await generate_ai_reply(
             subject=subject,
             sender=sender,
