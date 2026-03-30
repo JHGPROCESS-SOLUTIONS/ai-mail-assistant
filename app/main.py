@@ -1,5 +1,6 @@
 import os
 import json
+import asyncio
 import base64
 from email.mime.text import MIMEText
 from urllib.parse import quote
@@ -55,6 +56,10 @@ FRONTEND_PRICING_URL = os.getenv(
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+AUTO_PROCESS_ENABLED = os.getenv("AUTO_PROCESS_ENABLED", "true").lower() == "true"
+AUTO_PROCESS_INTERVAL_SECONDS = int(os.getenv("AUTO_PROCESS_INTERVAL_SECONDS", "60"))
+AUTO_PROCESS_MAX_RESULTS = int(os.getenv("AUTO_PROCESS_MAX_RESULTS", "10"))
 
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -446,6 +451,13 @@ async def supabase_upsert_mailbox(
         raise HTTPException(status_code=500, detail="Supabase mailboxes upsert returned no rows")
 
     return data[0]
+
+
+async def get_all_active_mailboxes() -> list[dict[str, Any]]:
+    data = await supabase_get(
+        "/rest/v1/mailboxes?status=eq.connected&provider=eq.gmail&select=*"
+    )
+    return data if isinstance(data, list) else []
 
 
 # ----------------------------
@@ -1318,6 +1330,45 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
     }
 
 
+async def auto_process_loop():
+    await asyncio.sleep(8)
+
+    while True:
+        try:
+            if not AUTO_PROCESS_ENABLED:
+                await asyncio.sleep(AUTO_PROCESS_INTERVAL_SECONDS)
+                continue
+
+            mailboxes = await get_all_active_mailboxes()
+            print(f"🔄 Auto processing {len(mailboxes)} connected mailbox(es)...")
+
+            for mailbox in mailboxes:
+                email = mailbox.get("email_address")
+
+                if not email:
+                    continue
+
+                try:
+                    await process_inbox_for_user(
+                        email=email,
+                        max_results=AUTO_PROCESS_MAX_RESULTS,
+                    )
+                    print(f"✅ Processed mailbox: {email}")
+                except Exception as exc:
+                    print(f"❌ Failed mailbox {email}: {repr(exc)}")
+
+        except Exception as exc:
+            print(f"❌ Auto processor loop error: {repr(exc)}")
+
+        await asyncio.sleep(AUTO_PROCESS_INTERVAL_SECONDS)
+
+
+@app.on_event("startup")
+async def start_background_tasks():
+    print("🚀 Multi-tenant auto processor started")
+    asyncio.create_task(auto_process_loop())
+
+
 # ----------------------------
 # Routes
 # ----------------------------
@@ -1492,113 +1543,7 @@ async def google_callback(code: str):
         mailbox_id=mailbox_id,
     )
 
-    gmail_response = await gmail_get_json_for_user(
-        user_id=user_id,
-        url=f"{GMAIL_API_BASE}/messages",
-        params={
-            "maxResults": 1,
-            "labelIds": "INBOX",
-            "q": "-category:social -category:promotions -category:updates",
-        },
-    )
-
-    messages = gmail_response.get("messages", [])
-    if not messages:
-        return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
-
-    first_message_id = messages[0]["id"]
-    first_thread_id = messages[0].get("threadId")
-
-    first_email = await gmail_get_json_for_user(
-        user_id=user_id,
-        url=f"{GMAIL_API_BASE}/messages/{first_message_id}",
-    )
-
-    payload = first_email.get("payload", {})
-    headers = payload.get("headers", [])
-    body_text = extract_plain_text_from_payload(payload)
-    subject = get_header_value(headers, "Subject")
-    sender = get_header_value(headers, "From")
-    original_message_id_header = get_header_value(headers, "Message-ID")
-    references_header = get_header_value(headers, "References")
-
-    email_row = await supabase_insert_email(
-        user_id=user_id,
-        mailbox_id=mailbox_id,
-        gmail_message_id=first_message_id,
-        gmail_thread_id=first_thread_id,
-        subject=subject,
-    )
-
-    classification = await classify_email(
-        subject=subject,
-        sender=sender,
-        body_text=body_text,
-    )
-
-    label_name = classification["label"]
-    generate_draft = classification["generate_draft"]
-
-    label_id = await get_gmail_label_id_by_name(
-        user_id=user_id,
-        label_name=label_name,
-    )
-
-    if label_id:
-        await apply_gmail_label_to_message(
-            user_id=user_id,
-            gmail_message_id=first_message_id,
-            label_id=label_id,
-        )
-
-    gmail_label_ids = first_email.get("labelIds", [])
-    is_marketing = "CATEGORY_PROMOTIONS" in gmail_label_ids
-    is_social = "CATEGORY_SOCIAL" in gmail_label_ids
-    is_updates = "CATEGORY_UPDATES" in gmail_label_ids
-
-    should_generate_draft = generate_draft and not is_marketing and not is_social and not is_updates
-
-    if should_generate_draft and email_row:
-        existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
-        if not existing_drafts:
-            ai_reply = await generate_ai_reply(
-                subject=subject,
-                sender=sender,
-                body_text=body_text,
-            )
-
-            to_email = extract_email_address(sender)
-
-            if to_email and ai_reply:
-                draft_result = await create_gmail_threaded_draft(
-                    user_id=user_id,
-                    to_email=to_email,
-                    subject=subject,
-                    body=ai_reply,
-                    thread_id=first_thread_id,
-                    original_message_id_header=original_message_id_header,
-                    references_header=references_header,
-                )
-
-                gmail_draft_id = draft_result.get("id")
-
-                if gmail_draft_id:
-                    await supabase_insert_draft(
-                        user_id=user_id,
-                        email_id=email_row["id"],
-                        gmail_draft_id=gmail_draft_id,
-                        subject=subject,
-                        draft_body=ai_reply,
-                        status="generated",
-                    )
-
-                    await supabase_upsert_onboarding_state(
-                        user_id=user_id,
-                        gmail_connected=True,
-                        profile_completed=True,
-                        initial_sync_completed=False,
-                        first_draft_generated=True,
-                    )
+    await process_inbox_for_user(email=user_email, max_results=1)
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
