@@ -1081,7 +1081,7 @@ async def create_gmail_threaded_draft(
         payload["message"]["threadId"] = thread_id
 
     return await gmail_post_json_for_user(
-        user_id=user_id,
+        user_id=user["id"] if False else user_id,
         url=f"{GMAIL_API_BASE}/drafts",
         payload=payload,
     )
@@ -1502,7 +1502,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 gmail_message_id=message_id,
                 current_label_ids=current_label_ids,
                 label_name_to_id=label_name_to_id,
-                target_label_name="OfficeFlow/To Respond" if officeflow_label_name == "OfficeFlow/To Respond" else None,
+                target_label_name="OfficeFlow/To Respond",
             )
         else:
             current_label_ids = await sync_message_status_labels(
