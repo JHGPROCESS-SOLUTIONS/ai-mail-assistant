@@ -147,6 +147,17 @@ def extract_email_address(from_header: str | None) -> str | None:
     return from_header.strip()
 
 
+def normalize_subject_for_reply(subject: str | None) -> str:
+    if not subject:
+        return "Re:"
+
+    stripped = subject.strip()
+    if stripped.lower().startswith("re:"):
+        return stripped
+
+    return f"Re: {stripped}"
+
+
 def extract_plain_text_from_payload(payload: dict[str, Any]) -> str | None:
     if not payload:
         return None
@@ -861,6 +872,63 @@ async def update_gmail_label_color(user_id: str, label_id: str, label_name: str)
     )
 
 
+def build_threaded_reply_raw(
+    to_email: str,
+    subject: str | None,
+    body: str,
+    original_message_id_header: str | None = None,
+    references_header: str | None = None,
+) -> str:
+    message = MIMEText(body, "plain", "utf-8")
+    message["To"] = to_email
+    message["Subject"] = normalize_subject_for_reply(subject)
+
+    if original_message_id_header:
+        message["In-Reply-To"] = original_message_id_header
+
+        if references_header:
+            refs = f"{references_header} {original_message_id_header}".strip()
+            message["References"] = refs
+        else:
+            message["References"] = original_message_id_header
+
+    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    return raw_message
+
+
+async def create_gmail_threaded_draft(
+    user_id: str,
+    to_email: str,
+    subject: str | None,
+    body: str,
+    thread_id: str | None = None,
+    original_message_id_header: str | None = None,
+    references_header: str | None = None,
+) -> dict[str, Any]:
+    raw_message = build_threaded_reply_raw(
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        original_message_id_header=original_message_id_header,
+        references_header=references_header,
+    )
+
+    payload: dict[str, Any] = {
+        "message": {
+            "raw": raw_message,
+        }
+    }
+
+    if thread_id:
+        payload["message"]["threadId"] = thread_id
+
+    return await gmail_post_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/drafts",
+        payload=payload,
+    )
+
+
 # ----------------------------
 # Labels
 # ----------------------------
@@ -1273,6 +1341,8 @@ async def google_callback(code: str):
     body_text = extract_plain_text_from_payload(payload)
     subject = get_header_value(headers, "Subject")
     sender = get_header_value(headers, "From")
+    original_message_id_header = get_header_value(headers, "Message-ID")
+    references_header = get_header_value(headers, "References")
 
     email_row = await supabase_insert_email(
         user_id=user_id,
@@ -1322,15 +1392,14 @@ async def google_callback(code: str):
             to_email = extract_email_address(sender)
 
             if to_email and ai_reply:
-                message = MIMEText(ai_reply)
-                message["to"] = to_email
-                message["subject"] = f"Re: {subject}" if subject else "Re:"
-                raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-                draft_result = await gmail_post_json_for_user(
+                draft_result = await create_gmail_threaded_draft(
                     user_id=user_id,
-                    url=f"{GMAIL_API_BASE}/drafts",
-                    payload={"message": {"raw": raw_message}},
+                    to_email=to_email,
+                    subject=subject,
+                    body=ai_reply,
+                    thread_id=first_thread_id,
+                    original_message_id_header=original_message_id_header,
+                    references_header=references_header,
                 )
 
                 gmail_draft_id = draft_result.get("id")
@@ -1483,12 +1552,15 @@ async def gmail_inbox(email: str, max_results: int = 10):
         from_header = get_header_value(headers, "From")
         subject = get_header_value(headers, "Subject")
         body_text = extract_plain_text_from_payload(payload)
+        original_message_id_header = get_header_value(headers, "Message-ID")
+        references_header = get_header_value(headers, "References")
+        thread_id = message_data.get("threadId")
 
         email_row = await supabase_insert_email(
             user_id=user["id"],
             mailbox_id=mailbox["id"],
             gmail_message_id=message_id,
-            gmail_thread_id=message_data.get("threadId"),
+            gmail_thread_id=thread_id,
             subject=subject,
         )
 
@@ -1544,15 +1616,14 @@ async def gmail_inbox(email: str, max_results: int = 10):
                 to_email = extract_email_address(from_header)
 
                 if to_email and ai_reply:
-                    draft_message = MIMEText(ai_reply)
-                    draft_message["to"] = to_email
-                    draft_message["subject"] = f"Re: {subject}" if subject else "Re:"
-                    raw_message = base64.urlsafe_b64encode(draft_message.as_bytes()).decode()
-
-                    draft_result = await gmail_post_json_for_user(
+                    draft_result = await create_gmail_threaded_draft(
                         user_id=user["id"],
-                        url=f"{GMAIL_API_BASE}/drafts",
-                        payload={"message": {"raw": raw_message}},
+                        to_email=to_email,
+                        subject=subject,
+                        body=ai_reply,
+                        thread_id=thread_id,
+                        original_message_id_header=original_message_id_header,
+                        references_header=references_header,
                     )
 
                     gmail_draft_id = draft_result.get("id")
@@ -1609,20 +1680,21 @@ async def gmail_draft_route(
     subject: str | None = Body(default=None),
     body: str = Body(...),
     email_id: str | None = Body(default=None),
+    gmail_thread_id: str | None = Body(default=None),
+    original_message_id: str | None = Body(default=None),
+    references: str | None = Body(default=None),
 ):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
 
-    message = MIMEText(body)
-    message["to"] = to_email
-    message["subject"] = f"Re: {subject}" if subject else "Re:"
-
-    raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
-
-    draft_result = await gmail_post_json_for_user(
+    draft_result = await create_gmail_threaded_draft(
         user_id=user["id"],
-        url=f"{GMAIL_API_BASE}/drafts",
-        payload={"message": {"raw": raw_message}},
+        to_email=to_email,
+        subject=subject,
+        body=body,
+        thread_id=gmail_thread_id,
+        original_message_id_header=original_message_id,
+        references_header=references,
     )
 
     gmail_draft_id = draft_result.get("id")
