@@ -1307,11 +1307,26 @@ async def gmail_classify_route(
 async def gmail_inbox(email: str, max_results: int = 10):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
+    mailbox = context["mailbox"]
 
     if max_results < 1:
         max_results = 1
     if max_results > 20:
         max_results = 20
+
+    await setup_gmail_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
+
+    labels_response = await gmail_get_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/labels",
+    )
+    label_name_to_id = {
+        label["name"]: label["id"]
+        for label in labels_response.get("labels", [])
+    }
 
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
@@ -1342,6 +1357,27 @@ async def gmail_inbox(email: str, max_results: int = 10):
         subject = get_header_value(headers, "Subject")
         body_text = extract_plain_text_from_payload(payload)
 
+        classification = await classify_email(
+            subject=subject,
+            sender=from_header,
+            body_text=body_text,
+        )
+
+        officeflow_label_name = classification["label"]
+        officeflow_label_id = label_name_to_id.get(officeflow_label_name)
+
+        if officeflow_label_id:
+            await apply_gmail_label_to_message(
+                user_id=user["id"],
+                gmail_message_id=message_id,
+                label_id=officeflow_label_id,
+            )
+
+            message_data = await gmail_get_json_for_user(
+                user_id=user["id"],
+                url=f"{GMAIL_API_BASE}/messages/{message_id}",
+            )
+
         results.append(
             {
                 "gmail_message_id": message_data.get("id"),
@@ -1352,6 +1388,9 @@ async def gmail_inbox(email: str, max_results: int = 10):
                 "snippet": message_data.get("snippet"),
                 "body_text": body_text[:500] if body_text else None,
                 "label_ids": message_data.get("labelIds", []),
+                "officeflow_label": officeflow_label_name,
+                "generate_draft": classification["generate_draft"],
+                "classification_reason": classification["reason"],
             }
         )
 
