@@ -1,4 +1,5 @@
 import os
+import json
 import base64
 from email.mime.text import MIMEText
 from urllib.parse import quote
@@ -60,11 +61,22 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing"}
 
 OFFICEFLOW_LABELS = [
+    "OfficeFlow/Priority",
     "OfficeFlow/To Respond",
     "OfficeFlow/FYI",
     "OfficeFlow/Notification",
     "OfficeFlow/Marketing",
+    "OfficeFlow/Spam",
 ]
+
+LABEL_RULES = {
+    "OfficeFlow/Priority": {"generate_draft": True},
+    "OfficeFlow/To Respond": {"generate_draft": True},
+    "OfficeFlow/FYI": {"generate_draft": False},
+    "OfficeFlow/Notification": {"generate_draft": False},
+    "OfficeFlow/Marketing": {"generate_draft": False},
+    "OfficeFlow/Spam": {"generate_draft": False},
+}
 
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
@@ -457,6 +469,10 @@ async def supabase_upsert_oauth_account(
     access_token: str | None,
     refresh_token: str | None,
 ) -> dict[str, Any]:
+    existing = await supabase_get_oauth_account(user_id=user_id, provider=provider)
+    existing_refresh_token = existing.get("refresh_token") if existing else None
+    effective_refresh_token = refresh_token if refresh_token else existing_refresh_token
+
     data = await supabase_post(
         "/rest/v1/oauth_accounts?on_conflict=user_id,provider",
         [
@@ -465,7 +481,7 @@ async def supabase_upsert_oauth_account(
                 "provider": provider,
                 "provider_account_id": provider_account_id,
                 "access_token": access_token,
-                "refresh_token": refresh_token,
+                "refresh_token": effective_refresh_token,
             }
         ],
         prefer="resolution=merge-duplicates,return=representation",
@@ -727,6 +743,29 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
     return data
 
 
+async def get_gmail_label_id_by_name(user_id: str, label_name: str) -> str | None:
+    labels_response = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/labels",
+    )
+
+    for label in labels_response.get("labels", []):
+        if label.get("name") == label_name:
+            return label.get("id")
+
+    return None
+
+
+async def apply_gmail_label_to_message(user_id: str, gmail_message_id: str, label_id: str) -> Any:
+    return await gmail_post_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/messages/{gmail_message_id}/modify",
+        payload={
+            "addLabelIds": [label_id],
+        },
+    )
+
+
 # ----------------------------
 # Labels
 # ----------------------------
@@ -780,6 +819,88 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
 # ----------------------------
 # AI
 # ----------------------------
+
+async def classify_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    prompt = f"""
+Je bent een e-mail classifier voor OfficeFlow.
+
+Kies exact 1 label uit deze lijst:
+- OfficeFlow/Priority
+- OfficeFlow/To Respond
+- OfficeFlow/FYI
+- OfficeFlow/Notification
+- OfficeFlow/Marketing
+- OfficeFlow/Spam
+
+Regels:
+- Priority: belangrijke mail met urgentie, klantwaarde, deadline of directe business impact
+- To Respond: normale mail waar een antwoord op nodig is
+- FYI: informatief, geen antwoord nodig
+- Notification: automatische melding, statusupdate, systeemmail
+- Marketing: nieuwsbrief, promotie, sales outreach, aanbieding
+- Spam: irrelevant, ongewenst, rommel of duidelijk lage kwaliteit
+
+Geef alleen geldige JSON terug in exact dit formaat:
+{{
+  "label": "OfficeFlow/To Respond",
+  "reason": "Korte reden"
+}}
+
+Van: {sender}
+Onderwerp: {subject}
+
+E-mail:
+{body_text}
+""".strip()
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Je classificeert zakelijke e-mails en geeft alleen geldige JSON terug.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+
+    data = parse_response_data(response)
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"OpenAI classify error: {data}")
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Invalid classifier response: {data}")
+
+    label = parsed.get("label")
+    reason = parsed.get("reason")
+
+    if label not in LABEL_RULES:
+        raise HTTPException(status_code=500, detail=f"Classifier returned invalid label: {label}")
+
+    return {
+        "label": label,
+        "reason": reason,
+        "generate_draft": LABEL_RULES[label]["generate_draft"],
+    }
+
 
 async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None) -> str:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
@@ -1002,6 +1123,11 @@ async def google_callback(code: str):
         first_draft_generated=False,
     )
 
+    await setup_gmail_labels_for_mailbox(
+        user_id=user_id,
+        mailbox_id=mailbox_id,
+    )
+
     gmail_response = await gmail_get_json_for_user(
         user_id=user_id,
         url=f"{GMAIL_API_BASE}/messages",
@@ -1038,45 +1164,67 @@ async def google_callback(code: str):
         subject=subject,
     )
 
-    ai_reply = await generate_ai_reply(
+    classification = await classify_email(
         subject=subject,
         sender=sender,
         body_text=body_text,
     )
 
-    to_email = extract_email_address(sender)
+    label_name = classification["label"]
+    generate_draft = classification["generate_draft"]
 
-    if to_email and ai_reply and email_row:
-        message = MIMEText(ai_reply)
-        message["to"] = to_email
-        message["subject"] = f"Re: {subject}" if subject else "Re:"
-        raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+    label_id = await get_gmail_label_id_by_name(
+        user_id=user_id,
+        label_name=label_name,
+    )
 
-        draft_result = await gmail_post_json_for_user(
+    if label_id:
+        await apply_gmail_label_to_message(
             user_id=user_id,
-            url=f"{GMAIL_API_BASE}/drafts",
-            payload={"message": {"raw": raw_message}},
+            gmail_message_id=first_message_id,
+            label_id=label_id,
         )
 
-        gmail_draft_id = draft_result.get("id")
+    if generate_draft and email_row:
+        ai_reply = await generate_ai_reply(
+            subject=subject,
+            sender=sender,
+            body_text=body_text,
+        )
 
-        if gmail_draft_id:
-            await supabase_insert_draft(
+        to_email = extract_email_address(sender)
+
+        if to_email and ai_reply:
+            message = MIMEText(ai_reply)
+            message["to"] = to_email
+            message["subject"] = f"Re: {subject}" if subject else "Re:"
+            raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode()
+
+            draft_result = await gmail_post_json_for_user(
                 user_id=user_id,
-                email_id=email_row["id"],
-                gmail_draft_id=gmail_draft_id,
-                subject=subject,
-                draft_body=ai_reply,
-                status="generated",
+                url=f"{GMAIL_API_BASE}/drafts",
+                payload={"message": {"raw": raw_message}},
             )
 
-            await supabase_upsert_onboarding_state(
-                user_id=user_id,
-                gmail_connected=True,
-                profile_completed=True,
-                initial_sync_completed=False,
-                first_draft_generated=True,
-            )
+            gmail_draft_id = draft_result.get("id")
+
+            if gmail_draft_id:
+                await supabase_insert_draft(
+                    user_id=user_id,
+                    email_id=email_row["id"],
+                    gmail_draft_id=gmail_draft_id,
+                    subject=subject,
+                    draft_body=ai_reply,
+                    status="generated",
+                )
+
+                await supabase_upsert_onboarding_state(
+                    user_id=user_id,
+                    gmail_connected=True,
+                    profile_completed=True,
+                    initial_sync_completed=False,
+                    first_draft_generated=True,
+                )
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
@@ -1128,6 +1276,27 @@ async def ai_reply_route(
     }
 
 
+@app.post("/gmail/classify")
+async def gmail_classify_route(
+    email: str = Body(...),
+    subject: str | None = Body(default=None),
+    sender: str | None = Body(default=None),
+    body_text: str | None = Body(default=None),
+):
+    await ensure_user_has_access(email)
+
+    result = await classify_email(
+        subject=subject,
+        sender=sender,
+        body_text=body_text,
+    )
+
+    return {
+        "status": "ok",
+        "classification": result,
+    }
+
+
 @app.get("/gmail/inbox")
 async def gmail_inbox(email: str, max_results: int = 10):
     context = await get_gmail_context_by_email(email)
@@ -1176,6 +1345,7 @@ async def gmail_inbox(email: str, max_results: int = 10):
                 "from_email": extract_email_address(from_header),
                 "snippet": message_data.get("snippet"),
                 "body_text": body_text[:500] if body_text else None,
+                "label_ids": message_data.get("labelIds", []),
             }
         )
 
