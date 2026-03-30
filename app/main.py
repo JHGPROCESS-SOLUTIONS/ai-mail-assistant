@@ -78,16 +78,14 @@ LABEL_RULES = {
     "OfficeFlow/Spam": {"generate_draft": False},
 }
 
-# Gmail only accepts predefined label colors. These values are from the Gmail API's
-# allowed color set. :contentReference[oaicite:1]{index=1}
 LABEL_COLORS = {
     "OfficeFlow/Priority": {
         "textColor": "#ffffff",
-        "backgroundColor": "#d14836",
+        "backgroundColor": "#cc3a21",
     },
     "OfficeFlow/To Respond": {
         "textColor": "#ffffff",
-        "backgroundColor": "#4a86e8",
+        "backgroundColor": "#3c78d8",
     },
     "OfficeFlow/FYI": {
         "textColor": "#000000",
@@ -103,7 +101,7 @@ LABEL_COLORS = {
     },
     "OfficeFlow/Spam": {
         "textColor": "#ffffff",
-        "backgroundColor": "#cc3a21",
+        "backgroundColor": "#822111",
     },
 }
 
@@ -881,24 +879,40 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
     results: list[dict[str, Any]] = []
 
     for label_name in OFFICEFLOW_LABELS:
+        color = LABEL_COLORS.get(label_name)
+
         if label_name in existing_map:
             label_obj = existing_map[label_name]
             label_id = label_obj["id"]
-            await update_gmail_label_color(user_id=user_id, label_id=label_id, label_name=label_name)
+
+            if color:
+                await gmail_patch_json_for_user(
+                    user_id=user_id,
+                    url=f"{GMAIL_API_BASE}/labels/{label_id}",
+                    payload={
+                        "color": {
+                            "textColor": color["textColor"],
+                            "backgroundColor": color["backgroundColor"],
+                        }
+                    },
+                )
         else:
-            color = LABEL_COLORS.get(label_name, {})
+            payload = {
+                "name": label_name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            }
+
+            if color:
+                payload["color"] = {
+                    "textColor": color["textColor"],
+                    "backgroundColor": color["backgroundColor"],
+                }
+
             created = await gmail_post_json_for_user(
                 user_id=user_id,
                 url=f"{GMAIL_API_BASE}/labels",
-                payload={
-                    "name": label_name,
-                    "labelListVisibility": "labelShow",
-                    "messageListVisibility": "show",
-                    "color": {
-                        "textColor": color.get("textColor", "#000000"),
-                        "backgroundColor": color.get("backgroundColor", "#f3f3f3"),
-                    },
-                },
+                payload=payload,
             )
             label_id = created["id"]
 
