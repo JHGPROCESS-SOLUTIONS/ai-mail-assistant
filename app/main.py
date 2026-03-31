@@ -1092,6 +1092,9 @@ async def sync_thread_status(
 
     for thread_message in thread_data.get("messages", []):
         thread_message_id = thread_message.get("id")
+        if not thread_message_id:
+            continue
+
         thread_message_label_ids = set(thread_message.get("labelIds", []))
 
         remove_label_ids = [
@@ -1101,12 +1104,8 @@ async def sync_thread_status(
         ]
 
         add_label_ids: list[str] = []
-        if thread_message_id == current_message_id:
-            if target_label_id not in thread_message_label_ids:
-                add_label_ids.append(target_label_id)
-        else:
-            if target_label_id in thread_message_label_ids:
-                remove_label_ids.append(target_label_id)
+        if target_label_id not in thread_message_label_ids:
+            add_label_ids.append(target_label_id)
 
         if add_label_ids or remove_label_ids:
             await modify_gmail_message_labels(
@@ -1116,14 +1115,12 @@ async def sync_thread_status(
                 remove_label_ids=remove_label_ids or None,
             )
 
-            if thread_message_id == current_message_id:
-                updated_current_label_ids = set(thread_message_label_ids)
-                for label_id in remove_label_ids:
-                    updated_current_label_ids.discard(label_id)
-                for label_id in add_label_ids:
-                    updated_current_label_ids.add(label_id)
-        elif thread_message_id == current_message_id:
+        if thread_message_id == current_message_id:
             updated_current_label_ids = set(thread_message_label_ids)
+            for label_id in remove_label_ids:
+                updated_current_label_ids.discard(label_id)
+            for label_id in add_label_ids:
+                updated_current_label_ids.add(label_id)
 
     return updated_current_label_ids
 
