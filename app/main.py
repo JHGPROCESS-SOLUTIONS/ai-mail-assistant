@@ -2056,6 +2056,11 @@ async def google_callback(code: str):
         mailbox_id=mailbox["id"],
     )
 
+    await cleanup_legacy_labels_for_mailbox(
+        user_id=user_id,
+        mailbox_id=mailbox["id"],
+    )
+
     await process_inbox_for_user(email=user_email, max_results=1)
 
     return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
