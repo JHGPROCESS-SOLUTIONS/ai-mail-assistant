@@ -107,6 +107,15 @@ CLASSIFIER_LABELS = {
     "Ignore",
 }
 
+FOLLOW_UP_CLASSIFIER_LABELS = {
+    "Priority",
+    "To Respond",
+    "Waiting On Reply",
+    "FYI",
+    "Notification",
+    "Ignore",
+}
+
 LABEL_COLORS = {
     "Priority": {
         "textColor": "#ffffff",
@@ -240,6 +249,19 @@ def supabase_headers() -> dict[str, str]:
         "apikey": service_role_key,
         "Authorization": f"Bearer {service_role_key}",
     }
+
+
+def get_status_label_names() -> list[str]:
+    return LABELS + list(LEGACY_LABEL_NAME_MAP.keys())
+
+
+def get_status_label_ids_from_map(label_name_to_id: dict[str, str]) -> set[str]:
+    label_ids: set[str] = set()
+    for label_name in get_status_label_names():
+        label_id = label_name_to_id.get(label_name)
+        if label_id:
+            label_ids.add(label_id)
+    return label_ids
 
 
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
@@ -894,10 +916,9 @@ async def sync_single_label(
     if not target_label_id:
         raise HTTPException(status_code=500, detail=f"Missing Gmail label id for {target_label_name}")
 
-    removable_label_names = LABELS + list(LEGACY_LABEL_NAME_MAP.keys())
     remove_label_ids: list[str] = []
 
-    for label_name in removable_label_names:
+    for label_name in get_status_label_names():
         label_id = label_name_to_id.get(label_name)
         if label_id and label_id in current_label_ids and label_id != target_label_id:
             remove_label_ids.append(label_id)
@@ -922,6 +943,74 @@ async def sync_single_label(
         return updated
 
     return current_label_ids
+
+
+async def sync_thread_status(
+    user_id: str,
+    thread_id: str | None,
+    current_message_id: str,
+    current_label_ids: set[str],
+    label_name_to_id: dict[str, str],
+    target_label_name: str,
+) -> set[str]:
+    if not thread_id:
+        return await sync_single_label(
+            user_id=user_id,
+            gmail_message_id=current_message_id,
+            current_label_ids=current_label_ids,
+            label_name_to_id=label_name_to_id,
+            target_label_name=target_label_name,
+        )
+
+    target_label_id = label_name_to_id.get(target_label_name)
+    if not target_label_id:
+        raise HTTPException(status_code=500, detail=f"Missing Gmail label id for {target_label_name}")
+
+    removable_label_ids = get_status_label_ids_from_map(label_name_to_id)
+
+    thread_data = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/threads/{thread_id}",
+    )
+
+    updated_current_label_ids = set(current_label_ids)
+
+    for thread_message in thread_data.get("messages", []):
+        thread_message_id = thread_message.get("id")
+        thread_message_label_ids = set(thread_message.get("labelIds", []))
+
+        remove_label_ids = [
+            label_id
+            for label_id in removable_label_ids
+            if label_id in thread_message_label_ids and label_id != target_label_id
+        ]
+
+        add_label_ids: list[str] = []
+        if thread_message_id == current_message_id:
+            if target_label_id not in thread_message_label_ids:
+                add_label_ids.append(target_label_id)
+        else:
+            if target_label_id in thread_message_label_ids:
+                remove_label_ids.append(target_label_id)
+
+        if add_label_ids or remove_label_ids:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=thread_message_id,
+                add_label_ids=add_label_ids or None,
+                remove_label_ids=remove_label_ids or None,
+            )
+
+            if thread_message_id == current_message_id:
+                updated_current_label_ids = set(thread_message_label_ids)
+                for label_id in remove_label_ids:
+                    updated_current_label_ids.discard(label_id)
+                for label_id in add_label_ids:
+                    updated_current_label_ids.add(label_id)
+        elif thread_message_id == current_message_id:
+            updated_current_label_ids = set(thread_message_label_ids)
+
+    return updated_current_label_ids
 
 
 def build_threaded_reply_raw(
@@ -1147,6 +1236,97 @@ E-mail:
     }
 
 
+async def classify_follow_up_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    prompt = f"""
+Je bent een e-mail classifier voor OfficeFlow.
+
+Context:
+- Dit is een bestaand gesprek.
+- De gebruiker heeft eerder al gereageerd in deze thread.
+- Er is nu weer een nieuw inkomend bericht binnengekomen.
+- Jij moet bepalen of deze thread opnieuw open moet staan als actiepunt, of juist meer een afrondende / informatieve vervolgreactie is.
+
+Kies exact 1 label uit deze lijst:
+- Priority
+- To Respond
+- Waiting On Reply
+- FYI
+- Notification
+- Ignore
+
+Regels:
+- Priority: er is nu duidelijke urgentie, business impact of snelle actie nodig
+- To Respond: de gebruiker moet nu weer inhoudelijk reageren of actie nemen
+- Waiting On Reply: er is geen directe reactie nodig van de gebruiker, maar het gesprek is nog actief of logisch open; vaak een afrondende reactie, bevestiging, korte update of iets dat niet direct teruggespeeld hoeft te worden
+- FYI: puur informatief, geen actie nodig
+- Notification: automatische melding of systeemupdate
+- Ignore: irrelevant of ongewenst
+
+Belangrijke voorkeur:
+- Als een bericht in een bestaande menselijke conversatie vooral afsluitend, bevestigend of niet-actieverhogend is, kies dan eerder Waiting On Reply dan FYI.
+- Kies alleen To Respond als er echt weer een vervolg van de gebruiker nodig is.
+
+Geef alleen geldige JSON terug in exact dit formaat:
+{{
+  "label": "To Respond",
+  "reason": "Korte reden"
+}}
+
+Van: {sender}
+Onderwerp: {subject}
+
+E-mail:
+{body_text}
+""".strip()
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Je classificeert vervolgberichten in bestaande e-mailthreads en geeft alleen geldige JSON terug.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+
+    data = parse_response_data(response)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"OpenAI follow-up classify error: {data}")
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Invalid follow-up classifier response: {data}")
+
+    label = parsed.get("label")
+    reason = parsed.get("reason")
+
+    if label not in FOLLOW_UP_CLASSIFIER_LABELS:
+        raise HTTPException(status_code=500, detail=f"Follow-up classifier returned invalid label: {label}")
+
+    return {
+        "label": label,
+        "reason": reason,
+        "generate_draft": LABEL_RULES[label]["generate_draft"],
+    }
+
+
 async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None) -> str:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
@@ -1219,12 +1399,8 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
     label_map = await get_all_gmail_labels(user["id"])
     label_name_to_id = {name: label["id"] for name, label in label_map.items()}
-
-    custom_label_ids = {
-        label_id
-        for label_name, label_id in label_name_to_id.items()
-        if label_name in LABELS or label_name in LEGACY_LABEL_NAME_MAP
-    }
+    custom_label_ids = get_status_label_ids_from_map(label_name_to_id)
+    done_label_id = label_name_to_id.get("Done")
 
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
@@ -1259,6 +1435,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         thread_id = message_data.get("threadId")
         current_label_ids = set(message_data.get("labelIds", []))
         has_any_custom_label = any(label_id in current_label_ids for label_id in custom_label_ids)
+        already_done = bool(done_label_id and done_label_id in current_label_ids)
 
         email_row = await supabase_insert_email(
             user_id=user["id"],
@@ -1281,14 +1458,12 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
         if thread_reply_state["user_is_latest_sender"]:
-            if existing_drafts:
-                target_label = "Done"
-            else:
-                target_label = "Waiting On Reply"
+            target_label = "Done" if already_done else "Waiting On Reply"
 
-            current_label_ids = await sync_single_label(
+            current_label_ids = await sync_thread_status(
                 user_id=user["id"],
-                gmail_message_id=message_id,
+                thread_id=thread_id,
+                current_message_id=message_id,
                 current_label_ids=current_label_ids,
                 label_name_to_id=label_name_to_id,
                 target_label_name=target_label,
@@ -1307,32 +1482,41 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "label": target_label,
                     "generate_draft": False,
                     "classification_reason": (
-                        "A stored OfficeFlow draft was sent in this thread, so it was marked Done."
-                        if existing_drafts
+                        "This thread was manually marked Done and there is no newer incoming reply yet."
+                        if already_done
                         else "You already sent the latest reply in this thread."
                     ),
                     "draft_created": False,
                     "gmail_draft_id": None,
                     "already_had_label": has_any_custom_label,
-                    "thread_status": "done_after_sent_draft" if existing_drafts else "waiting_on_reply",
+                    "thread_status": "done" if already_done else "waiting_on_reply",
                 }
             )
             continue
 
-        classification = await classify_email(
-            subject=subject,
-            sender=from_header,
-            body_text=body_text,
-        )
-
-        target_label = classification["label"]
-
         if thread_reply_state["needs_response_after_reply"]:
-            target_label = "To Respond"
+            classification = await classify_follow_up_email(
+                subject=subject,
+                sender=from_header,
+                body_text=body_text,
+            )
+            target_label = classification["label"]
+            classification_reason = classification["reason"]
+            thread_status = "reopened"
+        else:
+            classification = await classify_email(
+                subject=subject,
+                sender=from_header,
+                body_text=body_text,
+            )
+            target_label = classification["label"]
+            classification_reason = classification["reason"]
+            thread_status = "classified"
 
-        current_label_ids = await sync_single_label(
+        current_label_ids = await sync_thread_status(
             user_id=user["id"],
-            gmail_message_id=message_id,
+            thread_id=thread_id,
+            current_message_id=message_id,
             current_label_ids=current_label_ids,
             label_name_to_id=label_name_to_id,
             target_label_name=target_label,
@@ -1401,19 +1585,11 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "label_ids": list(current_label_ids),
                 "label": target_label,
                 "generate_draft": should_generate_draft,
-                "classification_reason": (
-                    "The other person replied after your last message, so the thread is back on your side."
-                    if thread_reply_state["needs_response_after_reply"]
-                    else classification["reason"]
-                ),
+                "classification_reason": classification_reason,
                 "draft_created": draft_created,
                 "gmail_draft_id": gmail_draft_id,
                 "already_had_label": has_any_custom_label,
-                "thread_status": (
-                    "to_respond_again"
-                    if thread_reply_state["needs_response_after_reply"]
-                    else "classified"
-                ),
+                "thread_status": thread_status,
             }
         )
 
@@ -1764,7 +1940,7 @@ async def gmail_draft_route(
 async def gmail_mark_done(
     email: str = Body(...),
     gmail_message_id: str = Body(...),
-    archive: bool = Body(default=True),
+    archive: bool = Body(default=False),
 ):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
@@ -1777,10 +1953,12 @@ async def gmail_mark_done(
         url=f"{GMAIL_API_BASE}/messages/{gmail_message_id}",
     )
     current_label_ids = set(message_data.get("labelIds", []))
+    thread_id = message_data.get("threadId")
 
-    updated_label_ids = await sync_single_label(
+    updated_label_ids = await sync_thread_status(
         user_id=user["id"],
-        gmail_message_id=gmail_message_id,
+        thread_id=thread_id,
+        current_message_id=gmail_message_id,
         current_label_ids=current_label_ids,
         label_name_to_id=label_name_to_id,
         target_label_name="Done",
