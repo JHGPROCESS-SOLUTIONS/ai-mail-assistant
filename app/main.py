@@ -270,6 +270,10 @@ def get_status_label_ids_from_map(label_name_to_id: dict[str, str]) -> set[str]:
     return label_ids
 
 
+def is_draft_label_ids(label_ids: set[str]) -> bool:
+    return "DRAFT" in label_ids and "SENT" not in label_ids
+
+
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
 
@@ -337,6 +341,26 @@ async def supabase_patch(
 
     if response.status_code >= 400:
         raise HTTPException(status_code=500, detail=f"Supabase PATCH failed: {data}")
+
+    return data
+
+
+async def supabase_delete(path_and_query: str, timeout: float = 30.0) -> Any:
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+
+    headers = supabase_headers()
+    headers["Prefer"] = "return=representation"
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.delete(
+            f"{supabase_url}{path_and_query}",
+            headers=headers,
+        )
+
+    data = parse_response_data(response)
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"Supabase DELETE failed: {data}")
 
     return data
 
@@ -831,6 +855,38 @@ async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, A
     return data
 
 
+async def gmail_delete_for_user(user_id: str, url: str) -> Any:
+    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
+    if not oauth:
+        raise HTTPException(status_code=400, detail="Google account not connected")
+
+    access_token = oauth.get("access_token")
+    refresh_token = oauth.get("refresh_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Missing Google access token")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.delete(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+        if response.status_code == 401 and refresh_token:
+            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
+            response = await client.delete(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+
+    if response.status_code == 404:
+        return {"status": "not_found"}
+
+    data = parse_response_data(response)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
+    return data or {"status": "deleted"}
+
+
 async def get_all_gmail_labels(user_id: str) -> dict[str, dict[str, Any]]:
     labels_response = await gmail_get_json_for_user(
         user_id=user_id,
@@ -909,6 +965,59 @@ async def ensure_label_exists(user_id: str, label_name: str) -> str:
         )
 
     return created["id"]
+
+
+async def delete_gmail_label_if_exists(user_id: str, label_name: str) -> dict[str, Any]:
+    label_map = await get_all_gmail_labels(user_id)
+    existing = label_map.get(label_name)
+
+    if not existing:
+        return {
+            "label_name": label_name,
+            "gmail_deleted": False,
+            "reason": "not_found_in_gmail",
+        }
+
+    label_id = existing["id"]
+    await gmail_delete_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/labels/{label_id}",
+    )
+
+    return {
+        "label_name": label_name,
+        "label_id": label_id,
+        "gmail_deleted": True,
+    }
+
+
+async def cleanup_legacy_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+
+    for legacy_label_name in LEGACY_LABEL_NAME_MAP.keys():
+        gmail_result = await delete_gmail_label_if_exists(
+            user_id=user_id,
+            label_name=legacy_label_name,
+        )
+
+        db_deleted = await supabase_delete(
+            (
+                "/rest/v1/gmail_labels"
+                f"?user_id=eq.{quote(user_id, safe='')}"
+                f"&mailbox_id=eq.{quote(mailbox_id, safe='')}"
+                f"&label_name=eq.{quote(legacy_label_name, safe='')}"
+            )
+        )
+
+        results.append(
+            {
+                "label_name": legacy_label_name,
+                "gmail": gmail_result,
+                "db_deleted_rows": db_deleted if isinstance(db_deleted, list) else [],
+            }
+        )
+
+    return results
 
 
 async def sync_single_label(
@@ -1075,6 +1184,10 @@ async def create_gmail_threaded_draft(
 
 def get_message_direction(message_data: dict[str, Any], mailbox_email: str | None) -> str:
     label_ids = set(message_data.get("labelIds", []))
+
+    if is_draft_label_ids(label_ids):
+        return "draft"
+
     payload = message_data.get("payload", {})
     headers = payload.get("headers", [])
     from_header = get_header_value(headers, "From")
@@ -1102,6 +1215,8 @@ async def get_thread_reply_state(
             "latest_message": None,
             "latest_user_message": None,
             "latest_incoming_message": None,
+            "has_open_draft": False,
+            "latest_draft_message": None,
         }
 
     thread_data = await gmail_get_json_for_user(
@@ -1118,9 +1233,20 @@ async def get_thread_reply_state(
     latest_incoming_message = None
     latest_incoming_date = 0
 
+    latest_draft_message = None
+    latest_draft_date = 0
+    has_open_draft = False
+
     for thread_message in thread_data.get("messages", []):
         internal_date = parse_internal_date_ms(thread_message.get("internalDate"))
         direction = get_message_direction(thread_message, mailbox_email)
+
+        if direction == "draft":
+            has_open_draft = True
+            if internal_date >= latest_draft_date:
+                latest_draft_message = thread_message
+                latest_draft_date = internal_date
+            continue
 
         if internal_date >= latest_message_date:
             latest_message = thread_message
@@ -1146,6 +1272,8 @@ async def get_thread_reply_state(
         "latest_message": latest_message,
         "latest_user_message": latest_user_message,
         "latest_incoming_message": latest_incoming_message,
+        "has_open_draft": has_open_draft,
+        "latest_draft_message": latest_draft_message,
     }
 
 
@@ -1270,7 +1398,7 @@ Je bent een e-mail classifier voor OfficeFlow.
 
 Context:
 - Dit is een bestaand gesprek.
-- De gebruiker heeft eerder al gereageerd in deze thread.
+- De gebruiker heeft eerder al echt gereageerd in deze thread.
 - Er is nu weer een nieuw inkomend bericht binnengekomen.
 - Jij moet bepalen of deze thread opnieuw open moet staan als actiepunt, of juist inhoudelijk klaar is.
 
@@ -1363,7 +1491,7 @@ async def classify_latest_sent_reply_status(subject: str | None, body_text: str 
 Je bent een e-mail classifier voor OfficeFlow.
 
 Context:
-- Dit is het LAATSTE bericht dat de gebruiker zelf heeft verstuurd in een thread.
+- Dit is het LAATSTE ECHT VERZONDEN bericht dat de gebruiker zelf heeft verstuurd in een thread.
 - Jij moet bepalen of de thread na dit verzonden bericht moet staan op Waiting On Reply of op Done.
 
 Kies exact 1 label uit deze lijst:
@@ -1562,6 +1690,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
         latest_user_message = thread_reply_state.get("latest_user_message")
         latest_incoming_message = thread_reply_state.get("latest_incoming_message")
+        has_open_draft = thread_reply_state.get("has_open_draft", False)
 
         latest_user_payload = latest_user_message.get("payload", {}) if latest_user_message else {}
         latest_user_headers = latest_user_payload.get("headers", []) if latest_user_message else []
@@ -1578,7 +1707,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_social_tab = "CATEGORY_SOCIAL" in current_label_ids
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
-        if thread_reply_state["user_is_latest_sender"]:
+        if thread_reply_state["user_is_latest_sender"] and latest_user_message is not None:
             sent_status = await classify_latest_sent_reply_status(
                 subject=latest_user_subject or subject,
                 body_text=latest_user_body_text,
@@ -1611,11 +1740,12 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "gmail_draft_id": None,
                     "already_had_label": has_any_custom_label,
                     "thread_status": "waiting_on_reply" if target_label == "Waiting On Reply" else "done_after_sent_reply",
+                    "has_open_draft": has_open_draft,
                 }
             )
             continue
 
-        if thread_reply_state["needs_response_after_reply"]:
+        if thread_reply_state["needs_response_after_reply"] and latest_incoming_message is not None:
             classification = await classify_follow_up_email(
                 subject=latest_incoming_subject or subject,
                 sender=latest_incoming_from or from_header,
@@ -1711,6 +1841,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "gmail_draft_id": gmail_draft_id,
                 "already_had_label": has_any_custom_label,
                 "thread_status": thread_status,
+                "has_open_draft": has_open_draft,
             }
         )
 
@@ -2118,6 +2249,25 @@ async def setup_labels(email: str = Body(...)):
         "user_id": user["id"],
         "mailbox_id": mailbox["id"],
         "labels": result,
+    }
+
+
+@app.post("/internal/cleanup-legacy-labels")
+async def cleanup_legacy_labels(email: str = Body(...)):
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    mailbox = context["mailbox"]
+
+    result = await cleanup_legacy_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
+
+    return {
+        "status": "ok",
+        "user_id": user["id"],
+        "mailbox_id": mailbox["id"],
+        "cleaned_labels": result,
     }
 
 
