@@ -66,64 +66,77 @@ GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing"}
 
 OFFICEFLOW_LABELS = [
-    "OfficeFlow/Priority",
-    "OfficeFlow/To Respond",
-    "OfficeFlow/Waiting On Reply",
-    "OfficeFlow/Done",
-    "OfficeFlow/FYI",
-    "OfficeFlow/Notification",
-    "OfficeFlow/Marketing",
-    "OfficeFlow/Spam",
+    "Priority",
+    "To Respond",
+    "Waiting On Reply",
+    "Done",
+    "FYI",
+    "Notification",
+    "Marketing",
+    "Spam",
 ]
 
+LEGACY_LABEL_NAME_MAP = {
+    "OfficeFlow/Priority": "Priority",
+    "OfficeFlow/To Respond": "To Respond",
+    "OfficeFlow/Waiting On Reply": "Waiting On Reply",
+    "OfficeFlow/Done": "Done",
+    "OfficeFlow/FYI": "FYI",
+    "OfficeFlow/Notification": "Notification",
+    "OfficeFlow/Marketing": "Marketing",
+    "OfficeFlow/Spam": "Spam",
+}
+
 LABEL_RULES = {
-    "OfficeFlow/Priority": {"generate_draft": True},
-    "OfficeFlow/To Respond": {"generate_draft": True},
-    "OfficeFlow/Waiting On Reply": {"generate_draft": False},
-    "OfficeFlow/Done": {"generate_draft": False},
-    "OfficeFlow/FYI": {"generate_draft": False},
-    "OfficeFlow/Notification": {"generate_draft": False},
-    "OfficeFlow/Marketing": {"generate_draft": False},
-    "OfficeFlow/Spam": {"generate_draft": False},
+    "Priority": {"generate_draft": True},
+    "To Respond": {"generate_draft": True},
+    "Waiting On Reply": {"generate_draft": True},
+    "Done": {"generate_draft": False},
+    "FYI": {"generate_draft": False},
+    "Notification": {"generate_draft": False},
+    "Marketing": {"generate_draft": False},
+    "Spam": {"generate_draft": False},
 }
 
 CLASSIFIER_LABELS = {
-    "OfficeFlow/Priority",
-    "OfficeFlow/To Respond",
-    "OfficeFlow/FYI",
-    "OfficeFlow/Notification",
-    "OfficeFlow/Marketing",
-    "OfficeFlow/Spam",
+    "Priority",
+    "To Respond",
+    "FYI",
+    "Notification",
+    "Marketing",
+    "Spam",
 }
 
-# Alleen bewezen werkende Gmail kleuren gebruiken.
-# Done krijgt expres GEEN custom color zodat je processing niet meer crasht.
 LABEL_COLORS = {
-    "OfficeFlow/Priority": {
+    "Priority": {
         "textColor": "#ffffff",
         "backgroundColor": "#cc3a21",
     },
-    "OfficeFlow/To Respond": {
+    "To Respond": {
         "textColor": "#ffffff",
         "backgroundColor": "#3c78d8",
     },
-    "OfficeFlow/Waiting On Reply": {
+    "Waiting On Reply": {
         "textColor": "#ffffff",
         "backgroundColor": "#8e63ce",
     },
-    "OfficeFlow/FYI": {
+    "Done": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#16a766",
+    },
+    "FYI": {
         "textColor": "#000000",
         "backgroundColor": "#f3f3f3",
     },
-    "OfficeFlow/Notification": {
+    "Notification": {
         "textColor": "#ffffff",
         "backgroundColor": "#8e63ce",
     },
-    "OfficeFlow/Marketing": {
+    "Marketing": {
         "textColor": "#000000",
         "backgroundColor": "#fad165",
     },
-    "OfficeFlow/Spam": {
+    "Spam": {
         "textColor": "#ffffff",
         "backgroundColor": "#822111",
     },
@@ -870,13 +883,49 @@ async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, A
     return data
 
 
-async def get_all_gmail_labels(user_id: str) -> dict[str, str]:
+async def gmail_delete_for_user(user_id: str, url: str) -> Any:
+    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
+
+    if not oauth:
+        raise HTTPException(status_code=400, detail="Google account not connected")
+
+    access_token = oauth.get("access_token")
+    refresh_token = oauth.get("refresh_token")
+
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Missing Google access token")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.delete(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
+
+        if response.status_code == 401 and refresh_token:
+            access_token = await refresh_google_access_token(
+                user_id=user_id,
+                refresh_token=refresh_token,
+            )
+            response = await client.delete(
+                url,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+
+    data = parse_response_data(response)
+
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
+
+    return data
+
+
+async def get_all_gmail_labels(user_id: str) -> dict[str, dict[str, Any]]:
     labels_response = await gmail_get_json_for_user(
         user_id=user_id,
         url=f"{GMAIL_API_BASE}/labels",
     )
     return {
-        label["name"]: label["id"]
+        label["name"]: label
         for label in labels_response.get("labels", [])
     }
 
@@ -922,7 +971,7 @@ async def update_gmail_label_color(user_id: str, label_id: str, label_name: str)
     )
 
 
-async def sync_single_officeflow_label(
+async def sync_single_label(
     user_id: str,
     gmail_message_id: str,
     current_label_ids: set[str],
@@ -933,10 +982,11 @@ async def sync_single_officeflow_label(
     if not target_label_id:
         raise HTTPException(status_code=500, detail=f"Missing Gmail label id for {target_label_name}")
 
+    removable_label_names = OFFICEFLOW_LABELS + list(LEGACY_LABEL_NAME_MAP.keys())
     remove_label_ids: list[str] = []
 
-    for officeflow_label_name in OFFICEFLOW_LABELS:
-        label_id = label_name_to_id.get(officeflow_label_name)
+    for label_name in removable_label_names:
+        label_id = label_name_to_id.get(label_name)
         if label_id and label_id in current_label_ids and label_id != target_label_id:
             remove_label_ids.append(label_id)
 
@@ -1050,7 +1100,7 @@ async def get_thread_reply_state(
     if not thread_id:
         return {
             "has_user_reply": False,
-            "waiting_on_reply": False,
+            "user_is_latest_sender": False,
             "needs_response_after_reply": False,
         }
 
@@ -1074,12 +1124,12 @@ async def get_thread_reply_state(
                 latest_incoming_date = internal_date
 
     has_user_reply = latest_user_sent_date > 0
-    waiting_on_reply = has_user_reply and latest_user_sent_date > latest_incoming_date
+    user_is_latest_sender = has_user_reply and latest_user_sent_date > latest_incoming_date
     needs_response_after_reply = has_user_reply and latest_incoming_date > latest_user_sent_date
 
     return {
         "has_user_reply": has_user_reply,
-        "waiting_on_reply": waiting_on_reply,
+        "user_is_latest_sender": user_is_latest_sender,
         "needs_response_after_reply": needs_response_after_reply,
     }
 
@@ -1089,16 +1139,34 @@ async def get_thread_reply_state(
 # ----------------------------
 
 async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
-    existing = await gmail_get_json_for_user(
-        user_id=user_id,
-        url=f"{GMAIL_API_BASE}/labels",
-    )
+    existing_map = await get_all_gmail_labels(user_id)
 
-    existing_map = {
-        label["name"]: label
-        for label in existing.get("labels", [])
-    }
+    # Rename legacy OfficeFlow/* labels to clean names where possible.
+    for legacy_name, new_name in LEGACY_LABEL_NAME_MAP.items():
+        if legacy_name in existing_map and new_name not in existing_map:
+            legacy_label = existing_map[legacy_name]
+            payload: dict[str, Any] = {
+                "name": new_name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            }
 
+            color = LABEL_COLORS.get(new_name)
+            if color:
+                payload["color"] = {
+                    "textColor": color["textColor"],
+                    "backgroundColor": color["backgroundColor"],
+                }
+
+            renamed = await gmail_patch_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/labels/{legacy_label['id']}",
+                payload=payload,
+            )
+            existing_map.pop(legacy_name, None)
+            existing_map[new_name] = renamed
+
+    # Ensure desired labels exist and have valid colors.
     results: list[dict[str, Any]] = []
 
     for label_name in OFFICEFLOW_LABELS:
@@ -1133,6 +1201,7 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
                 payload=payload,
             )
             label_id = created["id"]
+            existing_map[label_name] = created
 
         saved = await supabase_upsert_gmail_label(
             user_id=user_id,
@@ -1149,6 +1218,22 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
             }
         )
 
+    # Delete any leftover empty legacy labels.
+    refreshed_map = await get_all_gmail_labels(user_id)
+    for legacy_name in LEGACY_LABEL_NAME_MAP.keys():
+        legacy_label = refreshed_map.get(legacy_name)
+        if not legacy_label:
+            continue
+
+        messages_total = legacy_label.get("messagesTotal", 0) or 0
+        threads_total = legacy_label.get("threadsTotal", 0) or 0
+
+        if messages_total == 0 and threads_total == 0:
+            await gmail_delete_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/labels/{legacy_label['id']}",
+            )
+
     return results
 
 
@@ -1163,12 +1248,12 @@ async def classify_email(subject: str | None, sender: str | None, body_text: str
 Je bent een e-mail classifier voor OfficeFlow.
 
 Kies exact 1 label uit deze lijst:
-- OfficeFlow/Priority
-- OfficeFlow/To Respond
-- OfficeFlow/FYI
-- OfficeFlow/Notification
-- OfficeFlow/Marketing
-- OfficeFlow/Spam
+- Priority
+- To Respond
+- FYI
+- Notification
+- Marketing
+- Spam
 
 Regels:
 - Priority: belangrijke mail met urgentie, klantwaarde, deadline of directe business impact
@@ -1180,7 +1265,7 @@ Regels:
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
-  "label": "OfficeFlow/To Respond",
+  "label": "To Respond",
   "reason": "Korte reden"
 }}
 
@@ -1310,12 +1395,13 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         mailbox_id=mailbox["id"],
     )
 
-    label_name_to_id = await get_all_gmail_labels(user["id"])
+    label_map = await get_all_gmail_labels(user["id"])
+    label_name_to_id = {name: label["id"] for name, label in label_map.items()}
 
     officeflow_label_ids = {
         label_id
         for label_name, label_id in label_name_to_id.items()
-        if label_name.startswith("OfficeFlow/")
+        if label_name in OFFICEFLOW_LABELS or label_name in LEGACY_LABEL_NAME_MAP
     }
 
     gmail_data = await gmail_get_json_for_user(
@@ -1370,13 +1456,14 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_social_tab = "CATEGORY_SOCIAL" in current_label_ids
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
-        if thread_reply_state["waiting_on_reply"]:
-            current_label_ids = await sync_single_officeflow_label(
+        if thread_reply_state["user_is_latest_sender"]:
+            target_label = "Done"
+            current_label_ids = await sync_single_label(
                 user_id=user["id"],
                 gmail_message_id=message_id,
                 current_label_ids=current_label_ids,
                 label_name_to_id=label_name_to_id,
-                target_label_name="OfficeFlow/Waiting On Reply",
+                target_label_name=target_label,
             )
 
             results.append(
@@ -1389,13 +1476,13 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "snippet": message_data.get("snippet"),
                     "body_text": body_text[:500] if body_text else None,
                     "label_ids": list(current_label_ids),
-                    "officeflow_label": "OfficeFlow/Waiting On Reply",
+                    "label": "Done",
                     "generate_draft": False,
-                    "classification_reason": "You already sent the latest reply in this thread.",
+                    "classification_reason": "You sent the latest reply in this thread, so it was marked Done.",
                     "draft_created": False,
                     "gmail_draft_id": None,
                     "already_had_officeflow_label": has_any_officeflow_label,
-                    "thread_status": "waiting_on_reply",
+                    "thread_status": "done_after_reply",
                 }
             )
             continue
@@ -1406,21 +1493,21 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             body_text=body_text,
         )
 
-        officeflow_label_name = classification["label"]
+        target_label = classification["label"]
 
         if thread_reply_state["needs_response_after_reply"]:
-            officeflow_label_name = "OfficeFlow/To Respond"
+            target_label = "To Respond"
 
-        current_label_ids = await sync_single_officeflow_label(
+        current_label_ids = await sync_single_label(
             user_id=user["id"],
             gmail_message_id=message_id,
             current_label_ids=current_label_ids,
             label_name_to_id=label_name_to_id,
-            target_label_name=officeflow_label_name,
+            target_label_name=target_label,
         )
 
         should_generate_draft = (
-            LABEL_RULES[officeflow_label_name]["generate_draft"]
+            LABEL_RULES[target_label]["generate_draft"]
             and not is_marketing_tab
             and not is_social_tab
             and not is_updates_tab
@@ -1483,7 +1570,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "snippet": message_data.get("snippet"),
                 "body_text": body_text[:500] if body_text else None,
                 "label_ids": list(current_label_ids),
-                "officeflow_label": officeflow_label_name,
+                "label": target_label,
                 "generate_draft": should_generate_draft,
                 "classification_reason": (
                     "The other person replied after your last message, so the thread is back on your side."
@@ -1867,7 +1954,8 @@ async def gmail_mark_done(
     context = await get_gmail_context_by_email(email)
     user = context["user"]
 
-    label_name_to_id = await get_all_gmail_labels(user["id"])
+    label_map = await get_all_gmail_labels(user["id"])
+    label_name_to_id = {name: label["id"] for name, label in label_map.items()}
 
     message_data = await gmail_get_json_for_user(
         user_id=user["id"],
@@ -1875,18 +1963,18 @@ async def gmail_mark_done(
     )
     current_label_ids = set(message_data.get("labelIds", []))
 
-    updated_label_ids = await sync_single_officeflow_label(
+    updated_label_ids = await sync_single_label(
         user_id=user["id"],
         gmail_message_id=gmail_message_id,
         current_label_ids=current_label_ids,
         label_name_to_id=label_name_to_id,
-        target_label_name="OfficeFlow/Done",
+        target_label_name="Done",
     )
 
     return {
         "status": "ok",
         "gmail_message_id": gmail_message_id,
-        "officeflow_label": "OfficeFlow/Done",
+        "label": "Done",
         "label_ids": list(updated_label_ids),
     }
 
