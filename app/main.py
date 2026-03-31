@@ -96,6 +96,8 @@ CLASSIFIER_LABELS = {
     "OfficeFlow/Spam",
 }
 
+# Alleen bewezen werkende Gmail kleuren gebruiken.
+# Done krijgt expres GEEN custom color zodat je processing niet meer crasht.
 LABEL_COLORS = {
     "OfficeFlow/Priority": {
         "textColor": "#ffffff",
@@ -107,11 +109,7 @@ LABEL_COLORS = {
     },
     "OfficeFlow/Waiting On Reply": {
         "textColor": "#ffffff",
-        "backgroundColor": "#e69138",
-    },
-    "OfficeFlow/Done": {
-        "textColor": "#ffffff",
-        "backgroundColor": "#34a853",
+        "backgroundColor": "#8e63ce",
     },
     "OfficeFlow/FYI": {
         "textColor": "#000000",
@@ -1871,10 +1869,16 @@ async def gmail_mark_done(
 
     label_name_to_id = await get_all_gmail_labels(user["id"])
 
-    await sync_single_officeflow_label(
+    message_data = await gmail_get_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/messages/{gmail_message_id}",
+    )
+    current_label_ids = set(message_data.get("labelIds", []))
+
+    updated_label_ids = await sync_single_officeflow_label(
         user_id=user["id"],
         gmail_message_id=gmail_message_id,
-        current_label_ids=set(),
+        current_label_ids=current_label_ids,
         label_name_to_id=label_name_to_id,
         target_label_name="OfficeFlow/Done",
     )
@@ -1883,6 +1887,7 @@ async def gmail_mark_done(
         "status": "ok",
         "gmail_message_id": gmail_message_id,
         "officeflow_label": "OfficeFlow/Done",
+        "label_ids": list(updated_label_ids),
     }
 
 
