@@ -111,9 +111,15 @@ FOLLOW_UP_CLASSIFIER_LABELS = {
     "Priority",
     "To Respond",
     "Waiting On Reply",
+    "Done",
     "FYI",
     "Notification",
     "Ignore",
+}
+
+SENT_REPLY_STATUS_LABELS = {
+    "Waiting On Reply",
+    "Done",
 }
 
 LABEL_COLORS = {
@@ -1093,6 +1099,9 @@ async def get_thread_reply_state(
             "has_user_reply": False,
             "user_is_latest_sender": False,
             "needs_response_after_reply": False,
+            "latest_message": None,
+            "latest_user_message": None,
+            "latest_incoming_message": None,
         }
 
     thread_data = await gmail_get_json_for_user(
@@ -1100,17 +1109,31 @@ async def get_thread_reply_state(
         url=f"{GMAIL_API_BASE}/threads/{thread_id}",
     )
 
+    latest_message = None
+    latest_message_date = 0
+
+    latest_user_message = None
     latest_user_sent_date = 0
+
+    latest_incoming_message = None
     latest_incoming_date = 0
 
     for thread_message in thread_data.get("messages", []):
         internal_date = parse_internal_date_ms(thread_message.get("internalDate"))
         direction = get_message_direction(thread_message, mailbox_email)
 
+        if internal_date >= latest_message_date:
+            latest_message = thread_message
+            latest_message_date = internal_date
+
         if direction == "sent_by_user":
-            latest_user_sent_date = max(latest_user_sent_date, internal_date)
+            if internal_date >= latest_user_sent_date:
+                latest_user_message = thread_message
+                latest_user_sent_date = internal_date
         else:
-            latest_incoming_date = max(latest_incoming_date, internal_date)
+            if internal_date >= latest_incoming_date:
+                latest_incoming_message = thread_message
+                latest_incoming_date = internal_date
 
     has_user_reply = latest_user_sent_date > 0
     user_is_latest_sender = has_user_reply and latest_user_sent_date > latest_incoming_date
@@ -1120,6 +1143,9 @@ async def get_thread_reply_state(
         "has_user_reply": has_user_reply,
         "user_is_latest_sender": user_is_latest_sender,
         "needs_response_after_reply": needs_response_after_reply,
+        "latest_message": latest_message,
+        "latest_user_message": latest_user_message,
+        "latest_incoming_message": latest_incoming_message,
     }
 
 
@@ -1246,12 +1272,13 @@ Context:
 - Dit is een bestaand gesprek.
 - De gebruiker heeft eerder al gereageerd in deze thread.
 - Er is nu weer een nieuw inkomend bericht binnengekomen.
-- Jij moet bepalen of deze thread opnieuw open moet staan als actiepunt, of juist meer een afrondende / informatieve vervolgreactie is.
+- Jij moet bepalen of deze thread opnieuw open moet staan als actiepunt, of juist inhoudelijk klaar is.
 
 Kies exact 1 label uit deze lijst:
 - Priority
 - To Respond
 - Waiting On Reply
+- Done
 - FYI
 - Notification
 - Ignore
@@ -1259,18 +1286,20 @@ Kies exact 1 label uit deze lijst:
 Regels:
 - Priority: er is nu duidelijke urgentie, business impact of snelle actie nodig
 - To Respond: de gebruiker moet nu weer inhoudelijk reageren of actie nemen
-- Waiting On Reply: er is geen directe reactie nodig van de gebruiker, maar het gesprek is nog actief of logisch open; vaak een afrondende reactie, bevestiging, korte update of iets dat niet direct teruggespeeld hoeft te worden
-- FYI: puur informatief, geen actie nodig
+- Waiting On Reply: het gesprek is nog actief/open, maar dit laatste bericht vraagt niet direct om een reactie; gebruik dit spaarzaam
+- Done: het gesprek is inhoudelijk afgerond, bevestigd of afgesloten; er is geen verdere actie nodig
+- FYI: informatief, geen actie nodig
 - Notification: automatische melding of systeemupdate
 - Ignore: irrelevant of ongewenst
 
 Belangrijke voorkeur:
-- Als een bericht in een bestaande menselijke conversatie vooral afsluitend, bevestigend of niet-actieverhogend is, kies dan eerder Waiting On Reply dan FYI.
-- Kies alleen To Respond als er echt weer een vervolg van de gebruiker nodig is.
+- Als het laatste inkomende bericht dingen zegt als "bedankt", "duidelijk", "meer hoef ik niet te weten", "helemaal goed", "is prima", "alles is geregeld", kies dan Done.
+- Kies alleen To Respond als de gebruiker nu echt weer iets moet doen.
+- Kies Waiting On Reply alleen als het gesprek nog open voelt maar niet echt klaar is.
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
-  "label": "To Respond",
+  "label": "Done",
   "reason": "Korte reden"
 }}
 
@@ -1324,6 +1353,86 @@ E-mail:
         "label": label,
         "reason": reason,
         "generate_draft": LABEL_RULES[label]["generate_draft"],
+    }
+
+
+async def classify_latest_sent_reply_status(subject: str | None, body_text: str | None) -> dict[str, Any]:
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    prompt = f"""
+Je bent een e-mail classifier voor OfficeFlow.
+
+Context:
+- Dit is het LAATSTE bericht dat de gebruiker zelf heeft verstuurd in een thread.
+- Jij moet bepalen of de thread na dit verzonden bericht moet staan op Waiting On Reply of op Done.
+
+Kies exact 1 label uit deze lijst:
+- Waiting On Reply
+- Done
+
+Regels:
+- Waiting On Reply: de gebruiker heeft een vraag gesteld, iets uitgezet, om bevestiging gevraagd, een open punt achtergelaten, informatie opgevraagd of een reactie van de ander nodig
+- Done: het verzonden bericht is afsluitend; bijvoorbeeld een bedankje, bevestiging, afronding, korte slotreactie of een bericht zonder open vraag/verzoek
+
+Belangrijke voorkeur:
+- Als het verzonden bericht nog een vraagteken bevat, om bevestiging vraagt, iets open laat of duidelijk wacht op antwoord, kies Waiting On Reply.
+- Als het bericht meer klinkt als "bedankt", "top", "prima", "helemaal goed", "fijn", "ik hoor het niet meer", "alles duidelijk", kies Done.
+
+Geef alleen geldige JSON terug in exact dit formaat:
+{{
+  "label": "Done",
+  "reason": "Korte reden"
+}}
+
+Onderwerp: {subject}
+
+Laatste verzonden bericht:
+{body_text}
+""".strip()
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Je bepaalt of een laatst verzonden reply in een thread nog open staat of al klaar is, en geeft alleen geldige JSON terug.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+
+    data = parse_response_data(response)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"OpenAI sent-reply classify error: {data}")
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Invalid sent-reply classifier response: {data}")
+
+    label = parsed.get("label")
+    reason = parsed.get("reason")
+
+    if label not in SENT_REPLY_STATUS_LABELS:
+        raise HTTPException(status_code=500, detail=f"Sent-reply classifier returned invalid label: {label}")
+
+    return {
+        "label": label,
+        "reason": reason,
+        "generate_draft": False,
     }
 
 
@@ -1400,7 +1509,6 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
     label_map = await get_all_gmail_labels(user["id"])
     label_name_to_id = {name: label["id"] for name, label in label_map.items()}
     custom_label_ids = get_status_label_ids_from_map(label_name_to_id)
-    done_label_id = label_name_to_id.get("Done")
 
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
@@ -1435,7 +1543,6 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         thread_id = message_data.get("threadId")
         current_label_ids = set(message_data.get("labelIds", []))
         has_any_custom_label = any(label_id in current_label_ids for label_id in custom_label_ids)
-        already_done = bool(done_label_id and done_label_id in current_label_ids)
 
         email_row = await supabase_insert_email(
             user_id=user["id"],
@@ -1453,12 +1560,30 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             mailbox_email=mailbox_email,
         )
 
+        latest_user_message = thread_reply_state.get("latest_user_message")
+        latest_incoming_message = thread_reply_state.get("latest_incoming_message")
+
+        latest_user_payload = latest_user_message.get("payload", {}) if latest_user_message else {}
+        latest_user_headers = latest_user_payload.get("headers", []) if latest_user_message else []
+        latest_user_subject = get_header_value(latest_user_headers, "Subject")
+        latest_user_body_text = extract_plain_text_from_payload(latest_user_payload) if latest_user_message else None
+
+        latest_incoming_payload = latest_incoming_message.get("payload", {}) if latest_incoming_message else {}
+        latest_incoming_headers = latest_incoming_payload.get("headers", []) if latest_incoming_message else []
+        latest_incoming_subject = get_header_value(latest_incoming_headers, "Subject")
+        latest_incoming_from = get_header_value(latest_incoming_headers, "From")
+        latest_incoming_body_text = extract_plain_text_from_payload(latest_incoming_payload) if latest_incoming_message else None
+
         is_marketing_tab = "CATEGORY_PROMOTIONS" in current_label_ids
         is_social_tab = "CATEGORY_SOCIAL" in current_label_ids
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
         if thread_reply_state["user_is_latest_sender"]:
-            target_label = "Done" if already_done else "Waiting On Reply"
+            sent_status = await classify_latest_sent_reply_status(
+                subject=latest_user_subject or subject,
+                body_text=latest_user_body_text,
+            )
+            target_label = sent_status["label"]
 
             current_label_ids = await sync_thread_status(
                 user_id=user["id"],
@@ -1481,24 +1606,20 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "label_ids": list(current_label_ids),
                     "label": target_label,
                     "generate_draft": False,
-                    "classification_reason": (
-                        "This thread was manually marked Done and there is no newer incoming reply yet."
-                        if already_done
-                        else "You already sent the latest reply in this thread."
-                    ),
+                    "classification_reason": sent_status["reason"],
                     "draft_created": False,
                     "gmail_draft_id": None,
                     "already_had_label": has_any_custom_label,
-                    "thread_status": "done" if already_done else "waiting_on_reply",
+                    "thread_status": "waiting_on_reply" if target_label == "Waiting On Reply" else "done_after_sent_reply",
                 }
             )
             continue
 
         if thread_reply_state["needs_response_after_reply"]:
             classification = await classify_follow_up_email(
-                subject=subject,
-                sender=from_header,
-                body_text=body_text,
+                subject=latest_incoming_subject or subject,
+                sender=latest_incoming_from or from_header,
+                body_text=latest_incoming_body_text or body_text,
             )
             target_label = classification["label"]
             classification_reason = classification["reason"]
