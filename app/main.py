@@ -65,7 +65,7 @@ GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing"}
 
-OFFICEFLOW_LABELS = [
+LABELS = [
     "Priority",
     "To Respond",
     "Waiting On Reply",
@@ -73,7 +73,7 @@ OFFICEFLOW_LABELS = [
     "FYI",
     "Notification",
     "Marketing",
-    "Spam",
+    "Ignore",
 ]
 
 LEGACY_LABEL_NAME_MAP = {
@@ -84,7 +84,8 @@ LEGACY_LABEL_NAME_MAP = {
     "OfficeFlow/FYI": "FYI",
     "OfficeFlow/Notification": "Notification",
     "OfficeFlow/Marketing": "Marketing",
-    "OfficeFlow/Spam": "Spam",
+    "OfficeFlow/Spam": "Ignore",
+    "Spam": "Ignore",
 }
 
 LABEL_RULES = {
@@ -95,7 +96,7 @@ LABEL_RULES = {
     "FYI": {"generate_draft": False},
     "Notification": {"generate_draft": False},
     "Marketing": {"generate_draft": False},
-    "Spam": {"generate_draft": False},
+    "Ignore": {"generate_draft": False},
 }
 
 CLASSIFIER_LABELS = {
@@ -104,9 +105,11 @@ CLASSIFIER_LABELS = {
     "FYI",
     "Notification",
     "Marketing",
-    "Spam",
+    "Ignore",
 }
 
+# Alleen veilige, bekende Gmail kleuren gebruiken.
+# Als Gmail een kleur toch weigert, valt de code automatisch terug zonder kleur.
 LABEL_COLORS = {
     "Priority": {
         "textColor": "#ffffff",
@@ -136,7 +139,7 @@ LABEL_COLORS = {
         "textColor": "#000000",
         "backgroundColor": "#fad165",
     },
-    "Spam": {
+    "Ignore": {
         "textColor": "#ffffff",
         "backgroundColor": "#822111",
     },
@@ -883,42 +886,6 @@ async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, A
     return data
 
 
-async def gmail_delete_for_user(user_id: str, url: str) -> Any:
-    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
-
-    if not oauth:
-        raise HTTPException(status_code=400, detail="Google account not connected")
-
-    access_token = oauth.get("access_token")
-    refresh_token = oauth.get("refresh_token")
-
-    if not access_token:
-        raise HTTPException(status_code=400, detail="Missing Google access token")
-
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.delete(
-            url,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-
-        if response.status_code == 401 and refresh_token:
-            access_token = await refresh_google_access_token(
-                user_id=user_id,
-                refresh_token=refresh_token,
-            )
-            response = await client.delete(
-                url,
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-
-    data = parse_response_data(response)
-
-    if response.status_code >= 400:
-        raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
-
-    return data
-
-
 async def get_all_gmail_labels(user_id: str) -> dict[str, dict[str, Any]]:
     labels_response = await gmail_get_json_for_user(
         user_id=user_id,
@@ -954,21 +921,57 @@ async def modify_gmail_message_labels(
     )
 
 
-async def update_gmail_label_color(user_id: str, label_id: str, label_name: str) -> Any:
+async def try_create_or_update_label_color(
+    user_id: str,
+    label_id: str | None,
+    label_name: str,
+    create_if_missing: bool,
+) -> dict[str, Any] | None:
     color = LABEL_COLORS.get(label_name)
-    if not color:
+
+    if label_id and color:
+        try:
+            await gmail_patch_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/labels/{label_id}",
+                payload={
+                    "color": {
+                        "textColor": color["textColor"],
+                        "backgroundColor": color["backgroundColor"],
+                    }
+                },
+            )
+        except Exception:
+            pass
+
+    if not create_if_missing:
         return None
 
-    return await gmail_patch_json_for_user(
-        user_id=user_id,
-        url=f"{GMAIL_API_BASE}/labels/{label_id}",
-        payload={
-            "color": {
-                "textColor": color["textColor"],
-                "backgroundColor": color["backgroundColor"],
-            }
-        },
-    )
+    payload: dict[str, Any] = {
+        "name": label_name,
+        "labelListVisibility": "labelShow",
+        "messageListVisibility": "show",
+    }
+
+    if color:
+        payload["color"] = {
+            "textColor": color["textColor"],
+            "backgroundColor": color["backgroundColor"],
+        }
+
+    try:
+        return await gmail_post_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/labels",
+            payload=payload,
+        )
+    except Exception:
+        payload.pop("color", None)
+        return await gmail_post_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/labels",
+            payload=payload,
+        )
 
 
 async def sync_single_label(
@@ -982,7 +985,7 @@ async def sync_single_label(
     if not target_label_id:
         raise HTTPException(status_code=500, detail=f"Missing Gmail label id for {target_label_name}")
 
-    removable_label_names = OFFICEFLOW_LABELS + list(LEGACY_LABEL_NAME_MAP.keys())
+    removable_label_names = LABELS + list(LEGACY_LABEL_NAME_MAP.keys())
     remove_label_ids: list[str] = []
 
     for label_name in removable_label_names:
@@ -1140,68 +1143,30 @@ async def get_thread_reply_state(
 
 async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
     existing_map = await get_all_gmail_labels(user_id)
-
-    # Rename legacy OfficeFlow/* labels to clean names where possible.
-    for legacy_name, new_name in LEGACY_LABEL_NAME_MAP.items():
-        if legacy_name in existing_map and new_name not in existing_map:
-            legacy_label = existing_map[legacy_name]
-            payload: dict[str, Any] = {
-                "name": new_name,
-                "labelListVisibility": "labelShow",
-                "messageListVisibility": "show",
-            }
-
-            color = LABEL_COLORS.get(new_name)
-            if color:
-                payload["color"] = {
-                    "textColor": color["textColor"],
-                    "backgroundColor": color["backgroundColor"],
-                }
-
-            renamed = await gmail_patch_json_for_user(
-                user_id=user_id,
-                url=f"{GMAIL_API_BASE}/labels/{legacy_label['id']}",
-                payload=payload,
-            )
-            existing_map.pop(legacy_name, None)
-            existing_map[new_name] = renamed
-
-    # Ensure desired labels exist and have valid colors.
     results: list[dict[str, Any]] = []
 
-    for label_name in OFFICEFLOW_LABELS:
-        color = LABEL_COLORS.get(label_name)
+    for label_name in LABELS:
+        label_obj = existing_map.get(label_name)
 
-        if label_name in existing_map:
-            label_obj = existing_map[label_name]
+        if label_obj:
             label_id = label_obj["id"]
-
-            if color:
-                await update_gmail_label_color(
-                    user_id=user_id,
-                    label_id=label_id,
-                    label_name=label_name,
-                )
-        else:
-            payload: dict[str, Any] = {
-                "name": label_name,
-                "labelListVisibility": "labelShow",
-                "messageListVisibility": "show",
-            }
-
-            if color:
-                payload["color"] = {
-                    "textColor": color["textColor"],
-                    "backgroundColor": color["backgroundColor"],
-                }
-
-            created = await gmail_post_json_for_user(
+            await try_create_or_update_label_color(
                 user_id=user_id,
-                url=f"{GMAIL_API_BASE}/labels",
-                payload=payload,
+                label_id=label_id,
+                label_name=label_name,
+                create_if_missing=False,
             )
-            label_id = created["id"]
-            existing_map[label_name] = created
+        else:
+            created = await try_create_or_update_label_color(
+                user_id=user_id,
+                label_id=None,
+                label_name=label_name,
+                create_if_missing=True,
+            )
+            label_id = created["id"] if created else None
+
+        if not label_id:
+            raise HTTPException(status_code=500, detail=f"Could not create or find label: {label_name}")
 
         saved = await supabase_upsert_gmail_label(
             user_id=user_id,
@@ -1217,22 +1182,6 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
                 "db_row": saved,
             }
         )
-
-    # Delete any leftover empty legacy labels.
-    refreshed_map = await get_all_gmail_labels(user_id)
-    for legacy_name in LEGACY_LABEL_NAME_MAP.keys():
-        legacy_label = refreshed_map.get(legacy_name)
-        if not legacy_label:
-            continue
-
-        messages_total = legacy_label.get("messagesTotal", 0) or 0
-        threads_total = legacy_label.get("threadsTotal", 0) or 0
-
-        if messages_total == 0 and threads_total == 0:
-            await gmail_delete_for_user(
-                user_id=user_id,
-                url=f"{GMAIL_API_BASE}/labels/{legacy_label['id']}",
-            )
 
     return results
 
@@ -1253,7 +1202,7 @@ Kies exact 1 label uit deze lijst:
 - FYI
 - Notification
 - Marketing
-- Spam
+- Ignore
 
 Regels:
 - Priority: belangrijke mail met urgentie, klantwaarde, deadline of directe business impact
@@ -1261,7 +1210,7 @@ Regels:
 - FYI: informatief, geen antwoord nodig
 - Notification: automatische melding, statusupdate, systeemmail
 - Marketing: nieuwsbrief, promotie, sales outreach, aanbieding
-- Spam: irrelevant, ongewenst, rommel of duidelijk lage kwaliteit
+- Ignore: irrelevant, ongewenst, rommel of duidelijk lage kwaliteit
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
@@ -1401,7 +1350,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
     officeflow_label_ids = {
         label_id
         for label_name, label_id in label_name_to_id.items()
-        if label_name in OFFICEFLOW_LABELS or label_name in LEGACY_LABEL_NAME_MAP
+        if label_name in LABELS or label_name in LEGACY_LABEL_NAME_MAP
     }
 
     gmail_data = await gmail_get_json_for_user(
@@ -1436,7 +1385,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         references_header = get_header_value(headers, "References")
         thread_id = message_data.get("threadId")
         current_label_ids = set(message_data.get("labelIds", []))
-        has_any_officeflow_label = any(label_id in current_label_ids for label_id in officeflow_label_ids)
+        has_any_custom_label = any(label_id in current_label_ids for label_id in officeflow_label_ids)
 
         email_row = await supabase_insert_email(
             user_id=user["id"],
@@ -1476,12 +1425,13 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "snippet": message_data.get("snippet"),
                     "body_text": body_text[:500] if body_text else None,
                     "label_ids": list(current_label_ids),
-                    "label": "Done",
+                    "officeflow_label": target_label,
+                    "label": target_label,
                     "generate_draft": False,
                     "classification_reason": "You sent the latest reply in this thread, so it was marked Done.",
                     "draft_created": False,
                     "gmail_draft_id": None,
-                    "already_had_officeflow_label": has_any_officeflow_label,
+                    "already_had_officeflow_label": has_any_custom_label,
                     "thread_status": "done_after_reply",
                 }
             )
@@ -1570,6 +1520,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "snippet": message_data.get("snippet"),
                 "body_text": body_text[:500] if body_text else None,
                 "label_ids": list(current_label_ids),
+                "officeflow_label": target_label,
                 "label": target_label,
                 "generate_draft": should_generate_draft,
                 "classification_reason": (
@@ -1579,7 +1530,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 ),
                 "draft_created": draft_created,
                 "gmail_draft_id": gmail_draft_id,
-                "already_had_officeflow_label": has_any_officeflow_label,
+                "already_had_officeflow_label": has_any_custom_label,
                 "thread_status": (
                     "to_respond_again"
                     if thread_reply_state["needs_response_after_reply"]
@@ -1974,6 +1925,7 @@ async def gmail_mark_done(
     return {
         "status": "ok",
         "gmail_message_id": gmail_message_id,
+        "officeflow_label": "Done",
         "label": "Done",
         "label_ids": list(updated_label_ids),
     }
