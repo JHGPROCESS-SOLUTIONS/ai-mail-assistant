@@ -321,33 +321,20 @@ async def supabase_get_user_by_email(email: str) -> dict[str, Any] | None:
     data = await supabase_get(
         f"/rest/v1/users?email=eq.{quote(email, safe='')}&select=*"
     )
-
-    if isinstance(data, list) and data:
-        return data[0]
-
-    return None
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_get_user_by_stripe_customer_id(customer_id: str) -> dict[str, Any] | None:
     data = await supabase_get(
         f"/rest/v1/users?stripe_customer_id=eq.{quote(customer_id, safe='')}&select=*"
     )
-
-    if isinstance(data, list) and data:
-        return data[0]
-
-    return None
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_insert_user(email: str, full_name: str | None) -> dict[str, Any]:
     data = await supabase_post(
         "/rest/v1/users",
-        [
-            {
-                "email": email,
-                "full_name": full_name,
-            }
-        ],
+        [{"email": email, "full_name": full_name}],
     )
 
     if not isinstance(data, list) or not data:
@@ -358,10 +345,8 @@ async def supabase_insert_user(email: str, full_name: str | None) -> dict[str, A
 
 async def supabase_update_user_profile(user_id: str, full_name: str | None = None) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
-
     if full_name is not None:
         payload["full_name"] = full_name
-
     if not payload:
         return None
 
@@ -369,7 +354,6 @@ async def supabase_update_user_profile(user_id: str, full_name: str | None = Non
         f"/rest/v1/users?id=eq.{quote(user_id, safe='')}",
         payload,
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -384,10 +368,8 @@ async def supabase_update_user_subscription(
         "subscription_status": subscription_status,
         "access_allowed": access_allowed,
     }
-
     if stripe_customer_id is not None:
         payload["stripe_customer_id"] = stripe_customer_id
-
     if stripe_subscription_id is not None:
         payload["stripe_subscription_id"] = stripe_subscription_id
 
@@ -395,7 +377,6 @@ async def supabase_update_user_subscription(
         f"/rest/v1/users?id=eq.{quote(user_id, safe='')}",
         payload,
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -404,19 +385,16 @@ async def ensure_user_has_access(email: str) -> dict[str, Any]:
         raise HTTPException(status_code=401, detail="Missing user email")
 
     user = await supabase_get_user_by_email(email)
-
     if not user:
         raise HTTPException(status_code=403, detail="No user record found")
 
     access_allowed = user.get("access_allowed")
     subscription_status = user.get("subscription_status")
-
     has_access_columns = ("access_allowed" in user) or ("subscription_status" in user)
 
     if has_access_columns:
         if access_allowed is False:
             raise HTTPException(status_code=403, detail="Active subscription required")
-
         if subscription_status and subscription_status not in ALLOWED_SUBSCRIPTION_STATUSES:
             raise HTTPException(status_code=403, detail="Active subscription required")
 
@@ -441,11 +419,7 @@ async def supabase_get_mailbox_by_user_and_email(
             "&select=*"
         )
     )
-
-    if isinstance(data, list) and data:
-        return data[0]
-
-    return None
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_get_mailbox_by_user_id(
@@ -460,11 +434,7 @@ async def supabase_get_mailbox_by_user_id(
             "&select=*"
         )
     )
-
-    if isinstance(data, list) and data:
-        return data[0]
-
-    return None
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_upsert_mailbox(
@@ -475,14 +445,12 @@ async def supabase_upsert_mailbox(
 ) -> dict[str, Any]:
     data = await supabase_post(
         "/rest/v1/mailboxes?on_conflict=user_id,provider,email_address",
-        [
-            {
-                "user_id": user_id,
-                "provider": provider,
-                "email_address": email_address,
-                "status": status,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "provider": provider,
+            "email_address": email_address,
+            "status": status,
+        }],
         prefer="resolution=merge-duplicates,return=representation",
     )
 
@@ -515,11 +483,7 @@ async def supabase_get_oauth_account(
             "&select=*"
         )
     )
-
-    if isinstance(data, list) and data:
-        return data[0]
-
-    return None
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_update_oauth_account_tokens(
@@ -529,13 +493,10 @@ async def supabase_update_oauth_account_tokens(
     refresh_token: str | None = None,
 ) -> dict[str, Any] | None:
     payload: dict[str, Any] = {}
-
     if access_token is not None:
         payload["access_token"] = access_token
-
     if refresh_token is not None:
         payload["refresh_token"] = refresh_token
-
     if not payload:
         return None
 
@@ -547,7 +508,6 @@ async def supabase_update_oauth_account_tokens(
         ),
         payload,
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -564,15 +524,13 @@ async def supabase_upsert_oauth_account(
 
     data = await supabase_post(
         "/rest/v1/oauth_accounts?on_conflict=user_id,provider",
-        [
-            {
-                "user_id": user_id,
-                "provider": provider,
-                "provider_account_id": provider_account_id,
-                "access_token": access_token,
-                "refresh_token": effective_refresh_token,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "provider": provider,
+            "provider_account_id": provider_account_id,
+            "access_token": access_token,
+            "refresh_token": effective_refresh_token,
+        }],
         prefer="resolution=merge-duplicates,return=representation",
     )
 
@@ -595,18 +553,15 @@ async def supabase_upsert_onboarding_state(
 ) -> dict[str, Any] | None:
     data = await supabase_post(
         "/rest/v1/onboarding_state?on_conflict=user_id",
-        [
-            {
-                "user_id": user_id,
-                "gmail_connected": gmail_connected,
-                "profile_completed": profile_completed,
-                "initial_sync_completed": initial_sync_completed,
-                "first_draft_generated": first_draft_generated,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "gmail_connected": gmail_connected,
+            "profile_completed": profile_completed,
+            "initial_sync_completed": initial_sync_completed,
+            "first_draft_generated": first_draft_generated,
+        }],
         prefer="resolution=merge-duplicates,return=representation",
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -619,18 +574,15 @@ async def supabase_insert_email(
 ) -> dict[str, Any] | None:
     data = await supabase_post(
         "/rest/v1/emails?on_conflict=gmail_message_id",
-        [
-            {
-                "user_id": user_id,
-                "mailbox_id": mailbox_id,
-                "gmail_message_id": gmail_message_id,
-                "gmail_thread_id": gmail_thread_id,
-                "subject": subject,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "mailbox_id": mailbox_id,
+            "gmail_message_id": gmail_message_id,
+            "gmail_thread_id": gmail_thread_id,
+            "subject": subject,
+        }],
         prefer="resolution=merge-duplicates,return=representation",
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -651,18 +603,15 @@ async def supabase_insert_draft(
 ) -> dict[str, Any] | None:
     data = await supabase_post(
         "/rest/v1/drafts",
-        [
-            {
-                "user_id": user_id,
-                "email_id": email_id,
-                "gmail_draft_id": gmail_draft_id,
-                "subject": subject,
-                "draft_body": draft_body,
-                "status": status,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "email_id": email_id,
+            "gmail_draft_id": gmail_draft_id,
+            "subject": subject,
+            "draft_body": draft_body,
+            "status": status,
+        }],
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -674,17 +623,14 @@ async def supabase_upsert_gmail_label(
 ) -> dict[str, Any] | None:
     data = await supabase_post(
         "/rest/v1/gmail_labels?on_conflict=user_id,mailbox_id,label_name",
-        [
-            {
-                "user_id": user_id,
-                "mailbox_id": mailbox_id,
-                "label_name": label_name,
-                "label_id": label_id,
-            }
-        ],
+        [{
+            "user_id": user_id,
+            "mailbox_id": mailbox_id,
+            "label_name": label_name,
+            "label_id": label_id,
+        }],
         prefer="resolution=merge-duplicates,return=representation",
     )
-
     return data[0] if isinstance(data, list) and data else data
 
 
@@ -701,13 +647,11 @@ async def get_gmail_context_by_email(email: str) -> dict[str, Any]:
         email_address=email,
         provider="gmail",
     )
-
     if not mailbox:
         mailbox = await supabase_get_mailbox_by_user_id(
             user_id=user_id,
             provider="gmail",
         )
-
     if not mailbox:
         raise HTTPException(status_code=404, detail="Gmail mailbox not found")
 
@@ -715,7 +659,6 @@ async def get_gmail_context_by_email(email: str) -> dict[str, Any]:
         user_id=user_id,
         provider="google",
     )
-
     if not oauth:
         raise HTTPException(status_code=400, detail="Google account not connected")
 
@@ -742,7 +685,6 @@ async def refresh_google_access_token(user_id: str, refresh_token: str) -> str:
         )
 
     data = parse_response_data(response)
-
     new_access_token = data.get("access_token") if isinstance(data, dict) else None
 
     if not new_access_token:
@@ -753,19 +695,16 @@ async def refresh_google_access_token(user_id: str, refresh_token: str) -> str:
         provider="google",
         access_token=new_access_token,
     )
-
     return new_access_token
 
 
 async def gmail_get_json_for_user(user_id: str, url: str, params: dict[str, Any] | None = None) -> Any:
     oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
-
     if not oauth:
         raise HTTPException(status_code=400, detail="Google account not connected")
 
     access_token = oauth.get("access_token")
     refresh_token = oauth.get("refresh_token")
-
     if not access_token:
         raise HTTPException(status_code=400, detail="Missing Google access token")
 
@@ -777,10 +716,7 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict[str, Any]
         )
 
         if response.status_code == 401 and refresh_token:
-            access_token = await refresh_google_access_token(
-                user_id=user_id,
-                refresh_token=refresh_token,
-            )
+            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
             response = await client.get(
                 url,
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -788,22 +724,18 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict[str, Any]
             )
 
     data = parse_response_data(response)
-
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
-
     return data
 
 
 async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, Any]) -> Any:
     oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
-
     if not oauth:
         raise HTTPException(status_code=400, detail="Google account not connected")
 
     access_token = oauth.get("access_token")
     refresh_token = oauth.get("refresh_token")
-
     if not access_token:
         raise HTTPException(status_code=400, detail="Missing Google access token")
 
@@ -818,10 +750,7 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
         )
 
         if response.status_code == 401 and refresh_token:
-            access_token = await refresh_google_access_token(
-                user_id=user_id,
-                refresh_token=refresh_token,
-            )
+            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
             response = await client.post(
                 url,
                 headers={
@@ -832,10 +761,45 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
             )
 
     data = parse_response_data(response)
-
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
+    return data
 
+
+async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, Any]) -> Any:
+    oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
+    if not oauth:
+        raise HTTPException(status_code=400, detail="Google account not connected")
+
+    access_token = oauth.get("access_token")
+    refresh_token = oauth.get("refresh_token")
+    if not access_token:
+        raise HTTPException(status_code=400, detail="Missing Google access token")
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.patch(
+            url,
+            headers={
+                "Authorization": f"Bearer {access_token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+        )
+
+        if response.status_code == 401 and refresh_token:
+            access_token = await refresh_google_access_token(user_id=user_id, refresh_token=refresh_token)
+            response = await client.patch(
+                url,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+            )
+
+    data = parse_response_data(response)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
     return data
 
 
@@ -844,10 +808,7 @@ async def get_all_gmail_labels(user_id: str) -> dict[str, dict[str, Any]]:
         user_id=user_id,
         url=f"{GMAIL_API_BASE}/labels",
     )
-    return {
-        label["name"]: label
-        for label in labels_response.get("labels", [])
-    }
+    return {label["name"]: label for label in labels_response.get("labels", [])}
 
 
 async def modify_gmail_message_labels(
@@ -857,13 +818,10 @@ async def modify_gmail_message_labels(
     remove_label_ids: list[str] | None = None,
 ) -> Any:
     payload: dict[str, Any] = {}
-
     if add_label_ids:
         payload["addLabelIds"] = add_label_ids
-
     if remove_label_ids:
         payload["removeLabelIds"] = remove_label_ids
-
     if not payload:
         return None
 
@@ -874,38 +832,34 @@ async def modify_gmail_message_labels(
     )
 
 
-async def try_create_or_update_label_color(
-    user_id: str,
-    label_id: str | None,
-    label_name: str,
-    create_if_missing: bool,
-) -> dict[str, Any] | None:
-    color = LABEL_COLORS.get(label_name)
-
-    if label_id and color:
-        try:
-            await gmail_post_json_for_user(
-                user_id=user_id,
-                url=f"{GMAIL_API_BASE}/labels/{label_id}",
-                payload={
-                    "color": {
-                        "textColor": color["textColor"],
-                        "backgroundColor": color["backgroundColor"],
-                    }
-                },
-            )
-        except Exception:
-            pass
-
-    if not create_if_missing:
-        return None
+async def ensure_label_exists(user_id: str, label_name: str) -> str:
+    current_labels = await get_all_gmail_labels(user_id)
+    existing = current_labels.get(label_name)
+    if existing:
+        label_id = existing["id"]
+        color = LABEL_COLORS.get(label_name)
+        if color:
+            try:
+                await gmail_patch_json_for_user(
+                    user_id=user_id,
+                    url=f"{GMAIL_API_BASE}/labels/{label_id}",
+                    payload={
+                        "color": {
+                            "textColor": color["textColor"],
+                            "backgroundColor": color["backgroundColor"],
+                        }
+                    },
+                )
+            except Exception:
+                pass
+        return label_id
 
     payload: dict[str, Any] = {
         "name": label_name,
         "labelListVisibility": "labelShow",
         "messageListVisibility": "show",
     }
-
+    color = LABEL_COLORS.get(label_name)
     if color:
         payload["color"] = {
             "textColor": color["textColor"],
@@ -913,18 +867,20 @@ async def try_create_or_update_label_color(
         }
 
     try:
-        return await gmail_post_json_for_user(
+        created = await gmail_post_json_for_user(
             user_id=user_id,
             url=f"{GMAIL_API_BASE}/labels",
             payload=payload,
         )
     except Exception:
         payload.pop("color", None)
-        return await gmail_post_json_for_user(
+        created = await gmail_post_json_for_user(
             user_id=user_id,
             url=f"{GMAIL_API_BASE}/labels",
             payload=payload,
         )
+
+    return created["id"]
 
 
 async def sync_single_label(
@@ -981,10 +937,8 @@ def build_threaded_reply_raw(
 
     if original_message_id_header:
         message["In-Reply-To"] = original_message_id_header
-
         if references_header:
-            refs = f"{references_header} {original_message_id_header}".strip()
-            message["References"] = refs
+            message["References"] = f"{references_header} {original_message_id_header}".strip()
         else:
             message["References"] = original_message_id_header
 
@@ -1009,12 +963,7 @@ async def create_gmail_threaded_draft(
         references_header=references_header,
     )
 
-    payload: dict[str, Any] = {
-        "message": {
-            "raw": raw_message,
-        }
-    }
-
+    payload: dict[str, Any] = {"message": {"raw": raw_message}}
     if thread_id:
         payload["message"]["threadId"] = thread_id
 
@@ -1029,10 +978,7 @@ async def create_gmail_threaded_draft(
 # Thread state helpers
 # ----------------------------
 
-def get_message_direction(
-    message_data: dict[str, Any],
-    mailbox_email: str | None,
-) -> str:
+def get_message_direction(message_data: dict[str, Any], mailbox_email: str | None) -> str:
     label_ids = set(message_data.get("labelIds", []))
     payload = message_data.get("payload", {})
     headers = payload.get("headers", [])
@@ -1073,11 +1019,9 @@ async def get_thread_reply_state(
         direction = get_message_direction(thread_message, mailbox_email)
 
         if direction == "sent_by_user":
-            if internal_date > latest_user_sent_date:
-                latest_user_sent_date = internal_date
+            latest_user_sent_date = max(latest_user_sent_date, internal_date)
         else:
-            if internal_date > latest_incoming_date:
-                latest_incoming_date = internal_date
+            latest_incoming_date = max(latest_incoming_date, internal_date)
 
     has_user_reply = latest_user_sent_date > 0
     user_is_latest_sender = has_user_reply and latest_user_sent_date > latest_incoming_date
@@ -1095,25 +1039,10 @@ async def get_thread_reply_state(
 # ----------------------------
 
 async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
-    existing_map = await get_all_gmail_labels(user_id)
     results: list[dict[str, Any]] = []
 
     for label_name in LABELS:
-        label_obj = existing_map.get(label_name)
-
-        if label_obj:
-            label_id = label_obj["id"]
-        else:
-            created = await try_create_or_update_label_color(
-                user_id=user_id,
-                label_id=None,
-                label_name=label_name,
-                create_if_missing=True,
-            )
-            label_id = created["id"] if created else None
-
-        if not label_id:
-            raise HTTPException(status_code=500, detail=f"Could not create or find label: {label_name}")
+        label_id = await ensure_label_exists(user_id=user_id, label_name=label_name)
 
         saved = await supabase_upsert_gmail_label(
             user_id=user_id,
@@ -1196,7 +1125,6 @@ E-mail:
         )
 
     data = parse_response_data(response)
-
     if response.status_code >= 400:
         raise HTTPException(status_code=500, detail=f"OpenAI classify error: {data}")
 
@@ -1261,10 +1189,8 @@ E-mail:
         )
 
     data = parse_response_data(response)
-
     if response.status_code >= 400:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {data}")
-
     if not isinstance(data, dict) or "choices" not in data:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {data}")
 
@@ -1342,6 +1268,8 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             subject=subject,
         )
 
+        existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"]) if email_row else []
+
         thread_reply_state = await get_thread_reply_state(
             user_id=user["id"],
             thread_id=thread_id,
@@ -1353,7 +1281,11 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
         if thread_reply_state["user_is_latest_sender"]:
-            target_label = "Waiting On Reply"
+            if existing_drafts:
+                target_label = "Done"
+            else:
+                target_label = "Waiting On Reply"
+
             current_label_ids = await sync_single_label(
                 user_id=user["id"],
                 gmail_message_id=message_id,
@@ -1374,11 +1306,15 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "label_ids": list(current_label_ids),
                     "label": target_label,
                     "generate_draft": False,
-                    "classification_reason": "You already sent the latest reply in this thread.",
+                    "classification_reason": (
+                        "A stored OfficeFlow draft was sent in this thread, so it was marked Done."
+                        if existing_drafts
+                        else "You already sent the latest reply in this thread."
+                    ),
                     "draft_created": False,
                     "gmail_draft_id": None,
                     "already_had_label": has_any_custom_label,
-                    "thread_status": "waiting_on_reply",
+                    "thread_status": "done_after_sent_draft" if existing_drafts else "waiting_on_reply",
                 }
             )
             continue
@@ -1412,49 +1348,46 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         draft_created = False
         gmail_draft_id = None
 
-        if should_generate_draft and email_row:
-            existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"])
+        if should_generate_draft and email_row and not existing_drafts:
+            ai_reply = await generate_ai_reply(
+                subject=subject,
+                sender=from_header,
+                body_text=body_text,
+            )
 
-            if not existing_drafts:
-                ai_reply = await generate_ai_reply(
+            to_email = extract_email_address(from_header)
+
+            if to_email and ai_reply:
+                draft_result = await create_gmail_threaded_draft(
+                    user_id=user["id"],
+                    to_email=to_email,
                     subject=subject,
-                    sender=from_header,
-                    body_text=body_text,
+                    body=ai_reply,
+                    thread_id=thread_id,
+                    original_message_id_header=original_message_id_header,
+                    references_header=references_header,
                 )
 
-                to_email = extract_email_address(from_header)
+                gmail_draft_id = draft_result.get("id")
 
-                if to_email and ai_reply:
-                    draft_result = await create_gmail_threaded_draft(
+                if gmail_draft_id:
+                    await supabase_insert_draft(
                         user_id=user["id"],
-                        to_email=to_email,
+                        email_id=email_row["id"],
+                        gmail_draft_id=gmail_draft_id,
                         subject=subject,
-                        body=ai_reply,
-                        thread_id=thread_id,
-                        original_message_id_header=original_message_id_header,
-                        references_header=references_header,
+                        draft_body=ai_reply,
+                        status="generated",
                     )
+                    draft_created = True
 
-                    gmail_draft_id = draft_result.get("id")
-
-                    if gmail_draft_id:
-                        await supabase_insert_draft(
-                            user_id=user["id"],
-                            email_id=email_row["id"],
-                            gmail_draft_id=gmail_draft_id,
-                            subject=subject,
-                            draft_body=ai_reply,
-                            status="generated",
-                        )
-                        draft_created = True
-
-                        await supabase_upsert_onboarding_state(
-                            user_id=user["id"],
-                            gmail_connected=True,
-                            profile_completed=True,
-                            initial_sync_completed=False,
-                            first_draft_generated=True,
-                        )
+                    await supabase_upsert_onboarding_state(
+                        user_id=user["id"],
+                        gmail_connected=True,
+                        profile_completed=True,
+                        initial_sync_completed=False,
+                        first_draft_generated=True,
+                    )
 
         results.append(
             {
@@ -1505,7 +1438,6 @@ async def auto_process_loop():
 
             for mailbox in mailboxes:
                 email = mailbox.get("email_address")
-
                 if not email:
                     continue
 
@@ -1660,19 +1592,13 @@ async def google_callback(code: str):
             if exc.detail == "No user record found":
                 reason = "no_subscription_record"
 
-            return RedirectResponse(
-                url=build_pricing_redirect(reason),
-                status_code=302,
-            )
+            return RedirectResponse(url=build_pricing_redirect(reason), status_code=302)
         raise
 
     user_id = existing_user["id"]
 
     if user_name and user_name != existing_user.get("full_name"):
-        await supabase_update_user_profile(
-            user_id=user_id,
-            full_name=user_name,
-        )
+        await supabase_update_user_profile(user_id=user_id, full_name=user_name)
 
     await supabase_upsert_oauth_account(
         user_id=user_id,
@@ -1689,8 +1615,6 @@ async def google_callback(code: str):
         status="connected",
     )
 
-    mailbox_id = mailbox["id"]
-
     await supabase_upsert_onboarding_state(
         user_id=user_id,
         gmail_connected=True,
@@ -1701,7 +1625,7 @@ async def google_callback(code: str):
 
     await setup_gmail_labels_for_mailbox(
         user_id=user_id,
-        mailbox_id=mailbox_id,
+        mailbox_id=mailbox["id"],
     )
 
     await process_inbox_for_user(email=user_email, max_results=1)
@@ -1750,10 +1674,7 @@ async def ai_reply_route(
         body_text=body_text,
     )
 
-    return {
-        "status": "ok",
-        "reply": reply,
-    }
+    return {"status": "ok", "reply": reply}
 
 
 @app.post("/gmail/classify")
@@ -1771,10 +1692,7 @@ async def gmail_classify_route(
         body_text=body_text,
     )
 
-    return {
-        "status": "ok",
-        "classification": result,
-    }
+    return {"status": "ok", "classification": result}
 
 
 @app.get("/gmail/inbox")
@@ -1939,12 +1857,8 @@ async def stripe_webhook(request: Request):
                 return {"received": True}
 
             user = await supabase_get_user_by_email(email)
-
             if not user:
-                user = await supabase_insert_user(
-                    email=email,
-                    full_name=None,
-                )
+                user = await supabase_insert_user(email=email, full_name=None)
 
             await supabase_update_user_subscription(
                 user_id=user["id"],
@@ -1961,10 +1875,8 @@ async def stripe_webhook(request: Request):
 
             if customer_id:
                 user = await supabase_get_user_by_stripe_customer_id(customer_id)
-
                 if user:
                     access_allowed = status in ALLOWED_SUBSCRIPTION_STATUSES
-
                     await supabase_update_user_subscription(
                         user_id=user["id"],
                         subscription_status=status,
@@ -1979,7 +1891,6 @@ async def stripe_webhook(request: Request):
 
             if customer_id:
                 user = await supabase_get_user_by_stripe_customer_id(customer_id)
-
                 if user:
                     await supabase_update_user_subscription(
                         user_id=user["id"],
@@ -1995,6 +1906,5 @@ async def stripe_webhook(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe signature"})
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe payload"})
-    except Exception as e:
-        print("STRIPE WEBHOOK FATAL ERROR:", repr(e))
+    except Exception:
         return JSONResponse(status_code=500, content={"error": "Webhook handler failed"})
