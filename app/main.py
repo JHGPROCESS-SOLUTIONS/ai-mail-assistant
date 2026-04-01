@@ -70,6 +70,7 @@ LABELS = [
     "Priority",
     "To Respond",
     "Waiting On Reply",
+    "Follow Up",
     "Done",
     "FYI",
     "Notification",
@@ -92,6 +93,7 @@ LABEL_RULES = {
     "Priority": {"generate_draft": True},
     "To Respond": {"generate_draft": True},
     "Waiting On Reply": {"generate_draft": False},
+    "Follow Up": {"generate_draft": False},
     "Done": {"generate_draft": False},
     "FYI": {"generate_draft": False},
     "Notification": {"generate_draft": False},
@@ -120,6 +122,7 @@ FOLLOW_UP_CLASSIFIER_LABELS = {
 
 SENT_REPLY_STATUS_LABELS = {
     "Waiting On Reply",
+    "Follow Up",
     "Done",
 }
 
@@ -135,6 +138,10 @@ LABEL_COLORS = {
     "Waiting On Reply": {
         "textColor": "#ffffff",
         "backgroundColor": "#8e63ce",
+    },
+    "Follow Up": {
+        "textColor": "#000000",
+        "backgroundColor": "#f6bf26",
     },
     "Done": {
         "textColor": "#ffffff",
@@ -1640,23 +1647,28 @@ Je bent een e-mail classifier voor OfficeFlow.
 
 Context:
 - Dit is het LAATSTE ECHT VERZONDEN bericht dat de gebruiker zelf heeft verstuurd in een thread.
-- Jij moet bepalen of de thread na dit verzonden bericht moet staan op Waiting On Reply of op Done.
+- Jij moet bepalen of de thread na dit verzonden bericht moet staan op Waiting On Reply, Follow Up of Done.
 
 Kies exact 1 label uit deze lijst:
 - Waiting On Reply
+- Follow Up
 - Done
 
 Regels:
-- Waiting On Reply: de gebruiker heeft een vraag gesteld, iets uitgezet, om bevestiging gevraagd, een open punt achtergelaten, informatie opgevraagd of een reactie van de ander nodig
-- Done: het verzonden bericht is afsluitend; bijvoorbeeld een bedankje, bevestiging, afronding, korte slotreactie of een bericht zonder open vraag/verzoek
+- Waiting On Reply: de gebruiker wacht op antwoord van de andere partij; er staat een open vraag, verzoek om bevestiging of duidelijke reactie-vraag aan de ander
+- Follow Up: de gebruiker verwacht nu nog geen antwoord van de ander, maar heeft zelf aangegeven later nog iets te sturen, uit te zoeken, terug te koppelen of op te volgen
+- Done: het bericht is inhoudelijk afgerond; er is geen antwoord van de ander nodig en de gebruiker heeft ook geen open vervolgactie meer in deze thread
 
-Belangrijke voorkeur:
-- Als het verzonden bericht nog een vraagteken bevat, om bevestiging vraagt, iets open laat of duidelijk wacht op antwoord, kies Waiting On Reply.
-- Als het bericht meer klinkt als "bedankt", "top", "prima", "helemaal goed", "fijn", "ik hoor het niet meer", "alles duidelijk", kies Done.
+Belangrijke voorkeuren:
+- Zinnen zoals "Ik hoor graag van u", "Kun je dit bevestigen?", "Laat je weten of dit lukt?" => Waiting On Reply
+- Zinnen zoals "Je hoort vandaag nog van me", "Ik kom hier later op terug", "Ik pak dit op en kom erop terug" => Follow Up
+- Zinnen zoals "Top, dank", "Helemaal goed", "Bedankt voor de snelle reactie", "Voor nu niet meer nodig" => Done
+- Als de gebruiker zelf zegt iets later nog te doen of sturen, kies Follow Up en NIET Done
+- Kies alleen Waiting On Reply als er echt een antwoord van de andere partij nodig is
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
-  "label": "Done",
+  "label": "Follow Up",
   "reason": "Korte reden"
 }}
 
@@ -1678,7 +1690,7 @@ Laatste verzonden bericht:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Je bepaalt of een laatst verzonden reply in een thread nog open staat of al klaar is, en geeft alleen geldige JSON terug.",
+                        "content": "Je bepaalt de juiste threadstatus na een echt verzonden reply en geeft alleen geldige JSON terug.",
                     },
                     {
                         "role": "user",
@@ -1866,12 +1878,18 @@ async def generate_ai_reply(
     prompt = f"""
 Je bent een slimme e-mailassistent voor OfficeFlow.
 
-Taak:
-- Schrijf een korte, natuurlijke en professionele reply op deze e-mail.
-- Verzin geen feiten.
-- Blijf bruikbaar, menselijk en duidelijk.
-- Als de mail vooral informatief is en geen duidelijke vraag bevat, schrijf dan een korte beleefde ontvangstbevestiging.
-- Dit is een conceptreply, geen definitieve verzending.
+Schrijf een korte, directe en natuurlijke reply.
+Geen onnodige uitleg. Geen generieke zinnen. Geen AI-achtige formuleringen.
+
+Regels:
+- Max 2 tot 4 korte zinnen
+- Kom direct tot de kern
+- Schrijf menselijk, kort en bruikbaar
+- Verzin geen feiten
+- Vermijd vage zinnen zoals "Ik ga dit voor je uitzoeken" als er geen concrete timing in staat
+- Als iets nagekeken moet worden, geef een concrete terugkoppeling zoals "Ik kom hier vandaag nog op terug" of "Ik laat het je morgen weten"
+- Als de mail vooral informatief is en geen duidelijke vraag bevat, houd het bij een korte ontvangstbevestiging
+- Dit is een conceptreply, geen definitieve verzending
 
 Gebruikersvoorkeuren:
 {style_instructions if style_instructions else "Geen extra voorkeuren ingesteld."}
@@ -1880,7 +1898,10 @@ Geleerde schrijfstijl:
 {learned_style_instructions if learned_style_instructions else "Nog geen stijlprofiel beschikbaar."}
 
 Belangrijk:
-- Expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel.
+- Expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel
+- Schrijf niet overdreven formeel
+- Vermijd overbodige beleefdheidsvulling
+- Antwoord zoals een drukke, behulpzame professional
 
 Van: {sender}
 Onderwerp: {subject}
@@ -1889,7 +1910,10 @@ E-mail:
 {body_text}
 """.strip()
 
-    system_message = "Je schrijft korte, duidelijke zakelijke e-mails die natuurlijk klinken en de ingestelde gebruikersvoorkeuren volgen."
+    system_message = (
+        "Je schrijft korte, duidelijke zakelijke e-mails die natuurlijk klinken. "
+        "Je vermijdt generieke AI-teksten en kiest voor directe, menselijke formuleringen."
+    )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -1910,7 +1934,7 @@ E-mail:
                         "content": prompt,
                     },
                 ],
-                "temperature": 0.5,
+                "temperature": 0.4,
             },
         )
 
@@ -2016,7 +2040,11 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_social_tab = "CATEGORY_SOCIAL" in current_label_ids
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
-        if thread_reply_state["user_is_latest_sender"] and latest_user_message is not None:
+        if (
+            thread_reply_state["user_is_latest_sender"]
+            and latest_user_message is not None
+            and not has_open_draft
+        ):
             sent_status = await classify_latest_sent_reply_status(
                 subject=latest_user_subject or subject,
                 body_text=latest_user_body_text,
@@ -2031,6 +2059,13 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 label_name_to_id=label_name_to_id,
                 target_label_name=target_label,
             )
+
+            if target_label == "Waiting On Reply":
+                thread_status = "waiting_on_reply"
+            elif target_label == "Follow Up":
+                thread_status = "follow_up"
+            else:
+                thread_status = "done_after_sent_reply"
 
             results.append(
                 {
@@ -2048,7 +2083,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                     "draft_created": False,
                     "gmail_draft_id": None,
                     "already_had_label": has_any_custom_label,
-                    "thread_status": "waiting_on_reply" if target_label == "Waiting On Reply" else "done_after_sent_reply",
+                    "thread_status": thread_status,
                     "has_open_draft": has_open_draft,
                 }
             )
