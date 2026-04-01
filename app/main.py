@@ -593,7 +593,7 @@ async def supabase_upsert_oauth_account(
 
 
 # ----------------------------
-# Onboarding / email / drafts
+# Onboarding / email / drafts / settings
 # ----------------------------
 
 async def supabase_upsert_onboarding_state(
@@ -684,6 +684,32 @@ async def supabase_upsert_gmail_label(
         prefer="resolution=merge-duplicates,return=representation",
     )
     return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_get_user_settings(user_id: str) -> dict[str, Any] | None:
+    data = await supabase_get(
+        f"/rest/v1/user_settings?user_id=eq.{quote(user_id, safe='')}&select=*"
+    )
+    return data[0] if isinstance(data, list) and data else None
+
+
+async def supabase_upsert_user_settings(
+    user_id: str,
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    data = await supabase_post(
+        "/rest/v1/user_settings?on_conflict=user_id",
+        [{
+            "user_id": user_id,
+            **payload,
+        }],
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=500, detail="Supabase user_settings upsert returned no rows")
+
+    return data[0]
 
 
 # ----------------------------
@@ -2270,6 +2296,61 @@ async def cleanup_legacy_labels(email: str = Body(...)):
         "user_id": user["id"],
         "mailbox_id": mailbox["id"],
         "cleaned_labels": result,
+    }
+
+
+@app.post("/settings/prompt")
+async def save_prompt_settings(
+    email: str = Body(...),
+    preferred_language: str | None = Body(default=None),
+    tone_preference: str | None = Body(default=None),
+    formality: str | None = Body(default=None),
+    length_preference: str | None = Body(default=None),
+    emoji_preference: bool = Body(default=False),
+    cta_preference: str | None = Body(default=None),
+    signature_mode: str | None = Body(default=None),
+    forbidden_phrases: str | None = Body(default=None),
+    preferred_phrases: str | None = Body(default=None),
+    custom_instructions: str | None = Body(default=None),
+    style_learning_enabled: bool = Body(default=False),
+    style_learning_source_limit: int = Body(default=30),
+):
+    user = await ensure_user_has_access(email)
+
+    saved = await supabase_upsert_user_settings(
+        user_id=user["id"],
+        payload={
+            "preferred_language": preferred_language,
+            "tone_preference": tone_preference,
+            "formality": formality,
+            "length_preference": length_preference,
+            "emoji_preference": emoji_preference,
+            "cta_preference": cta_preference,
+            "signature_mode": signature_mode,
+            "forbidden_phrases": forbidden_phrases,
+            "preferred_phrases": preferred_phrases,
+            "custom_instructions": custom_instructions,
+            "style_learning_enabled": style_learning_enabled,
+            "style_learning_source_limit": style_learning_source_limit,
+        },
+    )
+
+    return {
+        "status": "ok",
+        "email": email,
+        "settings": saved,
+    }
+
+
+@app.get("/settings/prompt")
+async def get_prompt_settings(email: str):
+    user = await ensure_user_has_access(email)
+    settings = await supabase_get_user_settings(user["id"])
+
+    return {
+        "status": "ok",
+        "email": email,
+        "settings": settings,
     }
 
 
