@@ -712,6 +712,54 @@ async def supabase_upsert_user_settings(
     return data[0]
 
 
+def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
+    if not settings:
+        return ""
+
+    instructions: list[str] = []
+
+    preferred_language = settings.get("preferred_language")
+    tone_preference = settings.get("tone_preference")
+    formality = settings.get("formality")
+    length_preference = settings.get("length_preference")
+    emoji_preference = settings.get("emoji_preference")
+    cta_preference = settings.get("cta_preference")
+    signature_mode = settings.get("signature_mode")
+    forbidden_phrases = settings.get("forbidden_phrases")
+    preferred_phrases = settings.get("preferred_phrases")
+    custom_instructions = settings.get("custom_instructions")
+
+    if preferred_language == "nl":
+        instructions.append("Schrijf in het Nederlands.")
+    elif preferred_language == "en":
+        instructions.append("Write in English.")
+    elif preferred_language:
+        instructions.append(f"Gebruik deze taalvoorkeur: {preferred_language}")
+
+    if tone_preference:
+        instructions.append(f"Gewenste toon: {tone_preference}.")
+    if formality:
+        instructions.append(f"Gewenste formaliteit: {formality}.")
+    if length_preference:
+        instructions.append(f"Gewenste lengte: {length_preference}.")
+    if emoji_preference is False:
+        instructions.append("Gebruik geen emoji.")
+    elif emoji_preference is True:
+        instructions.append("Gebruik alleen spaarzaam emoji als dat natuurlijk voelt.")
+    if cta_preference:
+        instructions.append(f"Call-to-action voorkeur: {cta_preference}.")
+    if signature_mode:
+        instructions.append(f"Handtekeningstijl: {signature_mode}.")
+    if forbidden_phrases:
+        instructions.append(f"Gebruik deze formuleringen niet: {forbidden_phrases}")
+    if preferred_phrases:
+        instructions.append(f"Gebruik bij voorkeur deze stijl of formuleringen: {preferred_phrases}")
+    if custom_instructions:
+        instructions.append(f"Extra instructies van de gebruiker: {custom_instructions}")
+
+    return "\n".join(instructions)
+
+
 # ----------------------------
 # Gmail auth / context helpers
 # ----------------------------
@@ -1587,16 +1635,29 @@ Laatste verzonden bericht:
     }
 
 
-async def generate_ai_reply(subject: str | None, sender: str | None, body_text: str | None) -> str:
+async def generate_ai_reply(
+    user_id: str,
+    subject: str | None,
+    sender: str | None,
+    body_text: str | None,
+) -> str:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
-    prompt = f"""
-Je bent een slimme e-mailassistent.
+    settings = await supabase_get_user_settings(user_id)
+    style_instructions = build_reply_style_instructions(settings)
 
-Schrijf een korte, natuurlijke en professionele reply op deze e-mail.
-Hou de toon vriendelijk en menselijk.
-Verzin geen feiten.
-Als de mail vooral informatief is en geen duidelijke vraag bevat, schrijf dan een korte beleefde ontvangstbevestiging.
+    prompt = f"""
+Je bent een slimme e-mailassistent voor OfficeFlow.
+
+Taak:
+- Schrijf een korte, natuurlijke en professionele reply op deze e-mail.
+- Verzin geen feiten.
+- Blijf bruikbaar, menselijk en duidelijk.
+- Als de mail vooral informatief is en geen duidelijke vraag bevat, schrijf dan een korte beleefde ontvangstbevestiging.
+- Dit is een conceptreply, geen definitieve verzending.
+
+Gebruikersvoorkeuren:
+{style_instructions if style_instructions else "Geen extra voorkeuren ingesteld."}
 
 Van: {sender}
 Onderwerp: {subject}
@@ -1604,6 +1665,8 @@ Onderwerp: {subject}
 E-mail:
 {body_text}
 """.strip()
+
+    system_message = "Je schrijft korte, duidelijke zakelijke e-mails die natuurlijk klinken en de ingestelde gebruikersvoorkeuren volgen."
 
     async with httpx.AsyncClient(timeout=60.0) as client:
         response = await client.post(
@@ -1617,7 +1680,7 @@ E-mail:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Je schrijft korte, duidelijke zakelijke e-mails in natuurlijk Nederlands.",
+                        "content": system_message,
                     },
                     {
                         "role": "user",
@@ -1808,6 +1871,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
         if should_generate_draft and email_row and not existing_drafts:
             ai_reply = await generate_ai_reply(
+                user_id=user["id"],
                 subject=subject,
                 sender=from_header,
                 body_text=body_text,
@@ -2122,9 +2186,10 @@ async def ai_reply_route(
     sender: str | None = Body(default=None),
     body_text: str | None = Body(default=None),
 ):
-    await ensure_user_has_access(email)
+    user = await ensure_user_has_access(email)
 
     reply = await generate_ai_reply(
+        user_id=user["id"],
         subject=subject,
         sender=sender,
         body_text=body_text,
