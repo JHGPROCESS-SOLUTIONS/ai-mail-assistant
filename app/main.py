@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import base64
+from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from urllib.parse import quote
 from typing import Any
@@ -165,6 +166,10 @@ def require_env(value: str | None, name: str) -> str:
     if not value:
         raise HTTPException(status_code=500, detail=f"Missing environment variable: {name}")
     return value
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def decode_base64(data: str | None) -> str | None:
@@ -593,7 +598,7 @@ async def supabase_upsert_oauth_account(
 
 
 # ----------------------------
-# Onboarding / email / drafts / settings
+# Onboarding / email / drafts / settings / style profiles
 # ----------------------------
 
 async def supabase_upsert_onboarding_state(
@@ -712,6 +717,37 @@ async def supabase_upsert_user_settings(
     return data[0]
 
 
+async def supabase_get_user_style_profile(user_id: str) -> dict[str, Any] | None:
+    data = await supabase_get(
+        f"/rest/v1/user_style_profiles?user_id=eq.{quote(user_id, safe='')}&select=*"
+    )
+    return data[0] if isinstance(data, list) and data else None
+
+
+async def supabase_upsert_user_style_profile(
+    user_id: str,
+    source_sent_count: int,
+    style_profile_text: str,
+    style_profile_json: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    data = await supabase_post(
+        "/rest/v1/user_style_profiles?on_conflict=user_id",
+        [{
+            "user_id": user_id,
+            "source_sent_count": source_sent_count,
+            "last_trained_at": utc_now_iso(),
+            "style_profile_text": style_profile_text,
+            "style_profile_json": style_profile_json or {},
+        }],
+        prefer="resolution=merge-duplicates,return=representation",
+    )
+
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=500, detail="Supabase user_style_profiles upsert returned no rows")
+
+    return data[0]
+
+
 def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     if not settings:
         return ""
@@ -758,6 +794,47 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
         instructions.append(f"Extra instructies van de gebruiker: {custom_instructions}")
 
     return "\n".join(instructions)
+
+
+def build_style_profile_instructions(style_profile: dict[str, Any] | None) -> str:
+    if not style_profile:
+        return ""
+
+    style_profile_text = style_profile.get("style_profile_text")
+    if not style_profile_text:
+        return ""
+
+    return f"Geleerd stijlprofiel van eerdere echte verzonden mails:\n{style_profile_text}"
+
+
+def clean_reply_training_text(text: str | None) -> str:
+    if not text:
+        return ""
+
+    cleaned = text.strip()
+
+    split_markers = [
+        "\nOp ",
+        "\nOn ",
+        "\nFrom:",
+        "\nVan:",
+        "\n-----Original Message-----",
+        "\n________________________________",
+    ]
+
+    for marker in split_markers:
+        if marker in cleaned:
+            cleaned = cleaned.split(marker)[0].strip()
+
+    lines = []
+    for line in cleaned.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(">"):
+            continue
+        lines.append(line)
+
+    cleaned = "\n".join(lines).strip()
+    return cleaned
 
 
 # ----------------------------
@@ -1635,6 +1712,143 @@ Laatste verzonden bericht:
     }
 
 
+async def get_recent_sent_reply_samples(user_id: str, limit: int = 30) -> list[str]:
+    gmail_data = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/messages",
+        params={
+            "maxResults": min(max(limit, 1), 50),
+            "labelIds": "SENT",
+        },
+    )
+
+    messages = gmail_data.get("messages", [])
+    samples: list[str] = []
+
+    for message in messages:
+        message_id = message.get("id")
+        if not message_id:
+            continue
+
+        message_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/messages/{message_id}",
+        )
+
+        label_ids = set(message_data.get("labelIds", []))
+        if is_draft_label_ids(label_ids):
+            continue
+
+        payload = message_data.get("payload", {})
+        body_text = extract_plain_text_from_payload(payload)
+        cleaned = clean_reply_training_text(body_text)
+
+        if not cleaned or len(cleaned) < 20:
+            continue
+
+        lowered = cleaned.lower().strip()
+        if lowered in {"thanks", "thank you", "top", "prima", "ok", "oke"}:
+            continue
+
+        samples.append(cleaned)
+
+    return samples
+
+
+async def train_style_profile_from_sent_messages(
+    user_id: str,
+    source_limit: int = 30,
+) -> dict[str, Any]:
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    samples = await get_recent_sent_reply_samples(user_id=user_id, limit=source_limit)
+
+    if len(samples) < 3:
+        raise HTTPException(status_code=400, detail="Not enough usable sent emails to build style profile")
+
+    joined_samples = "\n\n---EMAIL SAMPLE---\n\n".join(samples[:30])
+
+    prompt = f"""
+Je analyseert echte eerder verzonden zakelijke e-mails van één gebruiker.
+
+Doel:
+- vat de schrijfstijl compact samen
+- maak een bruikbaar stijlprofiel voor toekomstige draft replies
+- beschrijf toon, lengte, directheid, formaliteit, typische afsluiting en opvallende stijlkenmerken
+- verzin niets dat niet uit de voorbeelden blijkt
+- gebruik duidelijke, praktische taal
+
+Geef alleen geldige JSON terug in exact dit formaat:
+{{
+  "style_profile_text": "Compacte stijlomschrijving",
+  "style_profile_json": {{
+    "language": "nl",
+    "tone": "friendly_professional",
+    "length": "short",
+    "formality": "neutral",
+    "directness": "direct",
+    "closing_style": "practical",
+    "emoji_usage": "rare",
+    "key_traits": ["trait 1", "trait 2"]
+  }}
+}}
+
+VOORBEELDEN:
+{joined_samples}
+""".strip()
+
+    async with httpx.AsyncClient(timeout=90.0) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "Je analyseert schrijfstijl van zakelijke e-mails en geeft alleen geldige JSON terug.",
+                    },
+                    {
+                        "role": "user",
+                        "content": prompt,
+                    },
+                ],
+                "temperature": 0,
+            },
+        )
+
+    data = parse_response_data(response)
+    if response.status_code >= 400:
+        raise HTTPException(status_code=500, detail=f"OpenAI style training error: {data}")
+
+    try:
+        content = data["choices"][0]["message"]["content"]
+        parsed = json.loads(content)
+    except Exception:
+        raise HTTPException(status_code=500, detail=f"Invalid style training response: {data}")
+
+    style_profile_text = parsed.get("style_profile_text")
+    style_profile_json = parsed.get("style_profile_json") or {}
+
+    if not style_profile_text:
+        raise HTTPException(status_code=500, detail="Style training returned no style_profile_text")
+
+    saved = await supabase_upsert_user_style_profile(
+        user_id=user_id,
+        source_sent_count=len(samples),
+        style_profile_text=style_profile_text,
+        style_profile_json=style_profile_json,
+    )
+
+    return {
+        "saved_profile": saved,
+        "source_sent_count": len(samples),
+    }
+
+
 async def generate_ai_reply(
     user_id: str,
     subject: str | None,
@@ -1644,7 +1858,10 @@ async def generate_ai_reply(
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
     settings = await supabase_get_user_settings(user_id)
+    style_profile = await supabase_get_user_style_profile(user_id)
+
     style_instructions = build_reply_style_instructions(settings)
+    learned_style_instructions = build_style_profile_instructions(style_profile)
 
     prompt = f"""
 Je bent een slimme e-mailassistent voor OfficeFlow.
@@ -1658,6 +1875,12 @@ Taak:
 
 Gebruikersvoorkeuren:
 {style_instructions if style_instructions else "Geen extra voorkeuren ingesteld."}
+
+Geleerde schrijfstijl:
+{learned_style_instructions if learned_style_instructions else "Nog geen stijlprofiel beschikbaar."}
+
+Belangrijk:
+- Expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel.
 
 Van: {sender}
 Onderwerp: {subject}
@@ -2416,6 +2639,38 @@ async def get_prompt_settings(email: str):
         "status": "ok",
         "email": email,
         "settings": settings,
+    }
+
+
+@app.get("/settings/style-profile")
+async def get_style_profile(email: str):
+    user = await ensure_user_has_access(email)
+    profile = await supabase_get_user_style_profile(user["id"])
+
+    return {
+        "status": "ok",
+        "email": email,
+        "style_profile": profile,
+    }
+
+
+@app.post("/internal/train-style-profile")
+async def train_style_profile(
+    email: str = Body(...),
+    source_limit: int = Body(default=30),
+):
+    user = await ensure_user_has_access(email)
+
+    result = await train_style_profile_from_sent_messages(
+        user_id=user["id"],
+        source_limit=source_limit,
+    )
+
+    return {
+        "status": "ok",
+        "email": email,
+        "source_sent_count": result["source_sent_count"],
+        "style_profile": result["saved_profile"],
     }
 
 
