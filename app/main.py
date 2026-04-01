@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
+from pydantic import BaseModel, EmailStr
 
 from app.billing import router as billing_router
 
@@ -169,6 +170,22 @@ if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
 
+class PromptSettingsPayload(BaseModel):
+    email: EmailStr
+    preferred_language: str | None = None
+    tone_preference: str | None = None
+    formality: str | None = None
+    length_preference: str | None = None
+    emoji_preference: bool | None = None
+    cta_preference: str | None = None
+    signature_mode: str | None = None
+    forbidden_phrases: list[str] | str | None = None
+    preferred_phrases: list[str] | str | None = None
+    custom_instructions: str | None = None
+    style_learning_enabled: bool = False
+    style_learning_source_limit: int = 30
+
+
 def require_env(value: str | None, name: str) -> str:
     if not value:
         raise HTTPException(status_code=500, detail=f"Missing environment variable: {name}")
@@ -284,6 +301,54 @@ def get_status_label_ids_from_map(label_name_to_id: dict[str, str]) -> set[str]:
 
 def is_draft_label_ids(label_ids: set[str]) -> bool:
     return "DRAFT" in label_ids and "SENT" not in label_ids
+
+
+def normalize_string(value: Any) -> str | None:
+    if value is None:
+        return None
+
+    if isinstance(value, str):
+        cleaned = value.strip()
+        return cleaned or None
+
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def normalize_phrase_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+
+    if isinstance(value, list):
+        cleaned_items: list[str] = []
+        for item in value:
+            normalized = normalize_string(item)
+            if normalized:
+                cleaned_items.append(normalized)
+        return cleaned_items
+
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+
+        if "\n" in raw:
+            parts = [part.strip() for part in raw.splitlines()]
+        elif "," in raw:
+            parts = [part.strip() for part in raw.split(",")]
+        else:
+            parts = [raw]
+
+        return [part for part in parts if part]
+
+    normalized = normalize_string(value)
+    return [normalized] if normalized else []
+
+
+def phrase_list_to_prompt_text(values: list[str]) -> str:
+    if not values:
+        return ""
+    return "; ".join(values)
 
 
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
@@ -768,8 +833,8 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     emoji_preference = settings.get("emoji_preference")
     cta_preference = settings.get("cta_preference")
     signature_mode = settings.get("signature_mode")
-    forbidden_phrases = settings.get("forbidden_phrases")
-    preferred_phrases = settings.get("preferred_phrases")
+    forbidden_phrases = normalize_phrase_list(settings.get("forbidden_phrases"))
+    preferred_phrases = normalize_phrase_list(settings.get("preferred_phrases"))
     custom_instructions = settings.get("custom_instructions")
 
     if preferred_language == "nl":
@@ -794,9 +859,13 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     if signature_mode:
         instructions.append(f"Handtekeningstijl: {signature_mode}.")
     if forbidden_phrases:
-        instructions.append(f"Gebruik deze formuleringen niet: {forbidden_phrases}")
+        instructions.append(
+            f"Gebruik deze formuleringen niet: {phrase_list_to_prompt_text(forbidden_phrases)}."
+        )
     if preferred_phrases:
-        instructions.append(f"Gebruik bij voorkeur deze stijl of formuleringen: {preferred_phrases}")
+        instructions.append(
+            f"Gebruik bij voorkeur deze stijl of formuleringen: {phrase_list_to_prompt_text(preferred_phrases)}."
+        )
     if custom_instructions:
         instructions.append(f"Extra instructies van de gebruiker: {custom_instructions}")
 
@@ -842,6 +911,40 @@ def clean_reply_training_text(text: str | None) -> str:
 
     cleaned = "\n".join(lines).strip()
     return cleaned
+
+
+def build_clean_settings_payload(payload: PromptSettingsPayload) -> dict[str, Any]:
+    preferred_language = normalize_string(payload.preferred_language)
+    tone_preference = normalize_string(payload.tone_preference)
+    formality = normalize_string(payload.formality)
+    length_preference = normalize_string(payload.length_preference)
+    cta_preference = normalize_string(payload.cta_preference)
+    signature_mode = normalize_string(payload.signature_mode)
+    custom_instructions = normalize_string(payload.custom_instructions)
+
+    forbidden_phrases = normalize_phrase_list(payload.forbidden_phrases)
+    preferred_phrases = normalize_phrase_list(payload.preferred_phrases)
+
+    source_limit = payload.style_learning_source_limit
+    if source_limit < 1:
+        source_limit = 1
+    if source_limit > 200:
+        source_limit = 200
+
+    return {
+        "preferred_language": preferred_language,
+        "tone_preference": tone_preference,
+        "formality": formality,
+        "length_preference": length_preference,
+        "emoji_preference": payload.emoji_preference,
+        "cta_preference": cta_preference,
+        "signature_mode": signature_mode,
+        "forbidden_phrases": forbidden_phrases,
+        "preferred_phrases": preferred_phrases,
+        "custom_instructions": custom_instructions,
+        "style_learning_enabled": payload.style_learning_enabled,
+        "style_learning_source_limit": source_limit,
+    }
 
 
 # ----------------------------
@@ -2623,44 +2726,18 @@ async def cleanup_legacy_labels(email: str = Body(...)):
 
 
 @app.post("/settings/prompt")
-async def save_prompt_settings(
-    email: str = Body(...),
-    preferred_language: str | None = Body(default=None),
-    tone_preference: str | None = Body(default=None),
-    formality: str | None = Body(default=None),
-    length_preference: str | None = Body(default=None),
-    emoji_preference: bool = Body(default=False),
-    cta_preference: str | None = Body(default=None),
-    signature_mode: str | None = Body(default=None),
-    forbidden_phrases: str | None = Body(default=None),
-    preferred_phrases: str | None = Body(default=None),
-    custom_instructions: str | None = Body(default=None),
-    style_learning_enabled: bool = Body(default=False),
-    style_learning_source_limit: int = Body(default=30),
-):
-    user = await ensure_user_has_access(email)
+async def save_prompt_settings(payload: PromptSettingsPayload):
+    user = await ensure_user_has_access(payload.email)
+    clean_payload = build_clean_settings_payload(payload)
 
     saved = await supabase_upsert_user_settings(
         user_id=user["id"],
-        payload={
-            "preferred_language": preferred_language,
-            "tone_preference": tone_preference,
-            "formality": formality,
-            "length_preference": length_preference,
-            "emoji_preference": emoji_preference,
-            "cta_preference": cta_preference,
-            "signature_mode": signature_mode,
-            "forbidden_phrases": forbidden_phrases,
-            "preferred_phrases": preferred_phrases,
-            "custom_instructions": custom_instructions,
-            "style_learning_enabled": style_learning_enabled,
-            "style_learning_source_limit": style_learning_source_limit,
-        },
+        payload=clean_payload,
     )
 
     return {
         "status": "ok",
-        "email": email,
+        "email": payload.email,
         "settings": saved,
     }
 
