@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import base64
+import re
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
 from urllib.parse import quote
@@ -19,7 +20,11 @@ from app.billing import router as billing_router
 
 load_dotenv()
 
-app = FastAPI(title="AI Mail Assistant API")
+app = FastAPI(
+    title="AI Mail Assistant API",
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -349,6 +354,69 @@ def phrase_list_to_prompt_text(values: list[str]) -> str:
     if not values:
         return ""
     return "; ".join(values)
+
+
+def sanitize_generated_reply(reply: str | None) -> str:
+    if not reply:
+        return ""
+
+    text = reply.strip().replace("\r\n", "\n")
+
+    text = re.sub(r"^```(?:text|txt|markdown)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+
+    lines = [line.rstrip() for line in text.split("\n")]
+
+    cleaned_lines: list[str] = []
+    skip_patterns = [
+        r"^\s*onderwerp\s*:",
+        r"^\s*subject\s*:",
+        r"^\s*re\s*:",
+        r"^\s*\[je naam\]\s*$",
+        r"^\s*\[your name\]\s*$",
+        r"^\s*officeflow\s*$",
+    ]
+
+    for line in lines:
+        stripped = line.strip()
+        if any(re.match(pattern, stripped, flags=re.IGNORECASE) for pattern in skip_patterns):
+            continue
+        cleaned_lines.append(line)
+
+    text = "\n".join(cleaned_lines).strip()
+
+    placeholder_blocks = [
+        "Groet,\n[je naam]\nOfficeFlow",
+        "Groet,\n[je naam]",
+        "Met vriendelijke groet,\n[je naam]\nOfficeFlow",
+        "Met vriendelijke groet,\n[je naam]",
+        "Best,\n[your name]",
+        "Kind regards,\n[your name]",
+    ]
+    for block in placeholder_blocks:
+        text = text.replace(block, "").strip()
+
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+
+    return text
+
+
+def maybe_apply_signature(reply_text: str, settings: dict[str, Any] | None) -> str:
+    if not reply_text:
+        return ""
+
+    signature_mode = (settings or {}).get("signature_mode")
+
+    if signature_mode in {None, "", "none"}:
+        return reply_text.strip()
+
+    if signature_mode == "include_name":
+        return reply_text.strip()
+
+    if signature_mode == "full_signature":
+        return reply_text.strip()
+
+    return reply_text.strip()
 
 
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
@@ -856,8 +924,12 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
         instructions.append("Gebruik alleen spaarzaam emoji als dat natuurlijk voelt.")
     if cta_preference:
         instructions.append(f"Call-to-action voorkeur: {cta_preference}.")
-    if signature_mode:
-        instructions.append(f"Handtekeningstijl: {signature_mode}.")
+    if signature_mode in {"none", None, ""}:
+        instructions.append("Voeg geen handtekening toe.")
+    elif signature_mode == "include_name":
+        instructions.append("Houd de afsluiting minimaal. Voeg geen placeholdernaam toe.")
+    elif signature_mode == "full_signature":
+        instructions.append("Gebruik alleen een handtekening als die expliciet bekend is. Gebruik nooit placeholders.")
     if forbidden_phrases:
         instructions.append(
             f"Gebruik deze formuleringen niet: {phrase_list_to_prompt_text(forbidden_phrases)}."
@@ -1979,20 +2051,50 @@ async def generate_ai_reply(
     learned_style_instructions = build_style_profile_instructions(style_profile)
 
     prompt = f"""
-Je bent een slimme e-mailassistent voor OfficeFlow.
+Je bent de persoonlijke e-mailassistent van de gebruiker.
 
-Schrijf een korte, directe en natuurlijke reply.
-Geen onnodige uitleg. Geen generieke zinnen. Geen AI-achtige formuleringen.
+Jouw taak:
+- schrijf ALLEEN de body van een reply
+- schrijf alsof de gebruiker zelf snel antwoordt
+- maak het bruikbaar als echte conceptmail in Gmail
 
-Regels:
-- Max 2 tot 4 korte zinnen
-- Kom direct tot de kern
-- Schrijf menselijk, kort en bruikbaar
-- Verzin geen feiten
-- Vermijd vage zinnen zoals "Ik ga dit voor je uitzoeken" als er geen concrete timing in staat
-- Als iets nagekeken moet worden, geef een concrete terugkoppeling zoals "Ik kom hier vandaag nog op terug" of "Ik laat het je morgen weten"
-- Als de mail vooral informatief is en geen duidelijke vraag bevat, houd het bij een korte ontvangstbevestiging
-- Dit is een conceptreply, geen definitieve verzending
+Harde regels:
+- schrijf GEEN onderwerpregel
+- schrijf NOOIT "Onderwerp:" of "Subject:"
+- gebruik GEEN placeholders zoals "[je naam]" of "[your name]"
+- noem NOOIT "OfficeFlow"
+- verzin geen details, prijzen, data of beloftes die niet in de mail staan
+- houd het bij maximaal 2 tot 4 korte zinnen
+- kom direct tot de kern
+- gebruik geen wollige openingszinnen
+- gebruik geen typische AI-zinnen
+- schrijf natuurlijk, menselijk, kort en geloofwaardig
+- als een korte bevestiging genoeg is, houd het ultrakort
+- als er nog iets moet volgen, formuleer dat concreet
+- als er geen handtekening bekend is, laat die weg
+
+Vermijd expliciet dit soort formuleringen:
+- "Bedankt voor je vraag"
+- "Dank voor je bericht" tenzij het echt natuurlijk voelt
+- "Ik hoop dat het goed met je gaat"
+- "Graag wil ik je informeren"
+- "Ik kom hier zo snel mogelijk op terug"
+- "Neem gerust contact op"
+- "Laat het gerust weten"
+- "Mocht je nog vragen hebben"
+- "Hierbij"
+
+Voorkeursstijl:
+- kort
+- direct
+- rustig zelfverzekerd
+- zakelijk menselijk
+- geen overdreven beleefdheidsvulling
+
+Specifieke instructie voor inhoud:
+- als iemand om een offerte, prijs of indicatie vraagt, geef een korte directe terugkoppeling zonder overbodige woorden
+- voorbeeldstijl: "Ik stuur je vandaag nog een prijsindicatie."
+- dus liever 1 sterke zin dan 3 middelmatige zinnen
 
 Gebruikersvoorkeuren:
 {style_instructions if style_instructions else "Geen extra voorkeuren ingesteld."}
@@ -2001,21 +2103,21 @@ Geleerde schrijfstijl:
 {learned_style_instructions if learned_style_instructions else "Nog geen stijlprofiel beschikbaar."}
 
 Belangrijk:
-- Expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel
-- Schrijf niet overdreven formeel
-- Vermijd overbodige beleefdheidsvulling
-- Antwoord zoals een drukke, behulpzame professional
+- expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel
+- output moet direct bruikbaar zijn als draft body
+- schrijf alleen de uiteindelijke tekst, zonder uitleg of toelichting
 
 Van: {sender}
 Onderwerp: {subject}
 
-E-mail:
+Originele e-mail:
 {body_text}
 """.strip()
 
     system_message = (
-        "Je schrijft korte, duidelijke zakelijke e-mails die natuurlijk klinken. "
-        "Je vermijdt generieke AI-teksten en kiest voor directe, menselijke formuleringen."
+        "Je schrijft extreem natuurlijke, korte zakelijke replies. "
+        "Je klinkt als een drukke professional, niet als een AI-assistent. "
+        "Je output bevat alleen de uiteindelijke mailtekst."
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -2037,7 +2139,7 @@ E-mail:
                         "content": prompt,
                     },
                 ],
-                "temperature": 0.4,
+                "temperature": 0.35,
             },
         )
 
@@ -2047,7 +2149,14 @@ E-mail:
     if not isinstance(data, dict) or "choices" not in data:
         raise HTTPException(status_code=500, detail=f"OpenAI error: {data}")
 
-    return data["choices"][0]["message"]["content"]
+    raw_reply = data["choices"][0]["message"]["content"]
+    cleaned_reply = sanitize_generated_reply(raw_reply)
+    final_reply = maybe_apply_signature(cleaned_reply, settings)
+
+    if not final_reply:
+        raise HTTPException(status_code=500, detail="Generated reply was empty after cleanup")
+
+    return final_reply
 
 
 # ----------------------------
