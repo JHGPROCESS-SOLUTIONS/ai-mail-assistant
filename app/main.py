@@ -2593,34 +2593,25 @@ async def google_callback(code: str):
         refresh_token=refresh_token,
     )
 
-    mailbox = await supabase_upsert_mailbox(
+    await supabase_upsert_mailbox(
         user_id=user_id,
         provider="gmail",
         email_address=user_email,
-        status="connected",
+        status="pending_setup",
     )
 
     await supabase_upsert_onboarding_state(
         user_id=user_id,
         gmail_connected=True,
-        profile_completed=True,
+        profile_completed=False,
         initial_sync_completed=False,
         first_draft_generated=False,
     )
 
-    await setup_gmail_labels_for_mailbox(
-        user_id=user_id,
-        mailbox_id=mailbox["id"],
+    return RedirectResponse(
+        url=f"https://officeflow-site2.vercel.app/onboarding/preferences.html?email={quote(user_email)}",
+        status_code=302,
     )
-
-    await cleanup_legacy_labels_for_mailbox(
-        user_id=user_id,
-        mailbox_id=mailbox["id"],
-    )
-
-    await process_inbox_for_user(email=user_email, max_results=1)
-
-    return RedirectResponse(url=FRONTEND_SUCCESS_URL, status_code=302)
 
 
 @app.get("/test/protected")
