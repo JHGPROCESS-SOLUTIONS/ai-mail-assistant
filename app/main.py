@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
 from app.billing import router as billing_router
 
@@ -171,7 +171,7 @@ if STRIPE_SECRET_KEY:
 
 
 class PromptSettingsPayload(BaseModel):
-    email: EmailStr
+    email: str
     preferred_language: str | None = None
     tone_preference: str | None = None
     formality: str | None = None
