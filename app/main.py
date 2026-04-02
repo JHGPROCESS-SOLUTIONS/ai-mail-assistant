@@ -2609,7 +2609,7 @@ async def google_callback(code: str):
     )
 
     return RedirectResponse(
-        url=f"https://officeflow-site2.vercel.app/onboarding/preferences.html?email={quote(user_email)}",
+        url=f"https://officeflow-site-one.vercel.app/onboarding/preferences.html?email={quote(user_email)}",
         status_code=302,
     )
 
