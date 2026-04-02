@@ -188,7 +188,7 @@ class PromptSettingsPayload(BaseModel):
     preferred_phrases: list[str] | str | None = None
     custom_instructions: str | None = None
     style_learning_enabled: bool = False
-    style_learning_source_limit: int = 30
+    style_learning_source_limit: int = 20
 
 
 def require_env(value: str | None, name: str) -> str:
@@ -1000,8 +1000,8 @@ def build_clean_settings_payload(payload: PromptSettingsPayload) -> dict[str, An
     source_limit = payload.style_learning_source_limit
     if source_limit < 1:
         source_limit = 1
-    if source_limit > 200:
-        source_limit = 200
+    if source_limit > 20:
+        source_limit = 20
 
     return {
         "preferred_language": preferred_language,
