@@ -191,6 +191,10 @@ class PromptSettingsPayload(BaseModel):
     style_learning_source_limit: int = 20
 
 
+class OnboardingCompletePayload(BaseModel):
+    email: str
+
+
 def require_env(value: str | None, name: str) -> str:
     if not value:
         raise HTTPException(status_code=500, detail=f"Missing environment variable: {name}")
@@ -657,6 +661,14 @@ async def supabase_upsert_mailbox(
     return data[0]
 
 
+async def supabase_update_mailbox_status(mailbox_id: str, status: str) -> dict[str, Any] | None:
+    data = await supabase_patch(
+        f"/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}",
+        {"status": status},
+    )
+    return data[0] if isinstance(data, list) and data else data
+
+
 async def get_all_active_mailboxes() -> list[dict[str, Any]]:
     data = await supabase_get(
         "/rest/v1/mailboxes?status=eq.connected&provider=eq.gmail&select=*"
@@ -760,6 +772,13 @@ async def supabase_upsert_onboarding_state(
         prefer="resolution=merge-duplicates,return=representation",
     )
     return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_get_onboarding_state(user_id: str) -> dict[str, Any] | None:
+    data = await supabase_get(
+        f"/rest/v1/onboarding_state?user_id=eq.{quote(user_id, safe='')}&select=*"
+    )
+    return data[0] if isinstance(data, list) and data else None
 
 
 async def supabase_insert_email(
@@ -2839,6 +2858,85 @@ async def save_prompt_settings(payload: PromptSettingsPayload):
         "status": "ok",
         "email": payload.email,
         "settings": saved,
+    }
+
+
+@app.post("/onboarding/complete")
+async def onboarding_complete(payload: OnboardingCompletePayload):
+    user = await ensure_user_has_access(payload.email)
+
+    mailbox = await supabase_get_mailbox_by_user_and_email(
+        user_id=user["id"],
+        email_address=payload.email,
+        provider="gmail",
+    )
+
+    if not mailbox:
+        mailbox = await supabase_get_mailbox_by_user_id(
+            user_id=user["id"],
+            provider="gmail",
+        )
+
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Gmail mailbox not found")
+
+    await supabase_update_mailbox_status(
+        mailbox_id=mailbox["id"],
+        status="connected",
+    )
+
+    onboarding_state = await supabase_get_onboarding_state(user["id"])
+    existing_first_draft_generated = False
+    if onboarding_state:
+        existing_first_draft_generated = bool(onboarding_state.get("first_draft_generated", False))
+
+    await supabase_upsert_onboarding_state(
+        user_id=user["id"],
+        gmail_connected=True,
+        profile_completed=True,
+        initial_sync_completed=False,
+        first_draft_generated=existing_first_draft_generated,
+    )
+
+    labels_result = await setup_gmail_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
+
+    cleanup_result = await cleanup_legacy_labels_for_mailbox(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+    )
+
+    process_result = await process_inbox_for_user(
+        email=payload.email,
+        max_results=AUTO_PROCESS_MAX_RESULTS,
+    )
+
+    first_draft_generated = existing_first_draft_generated or any(
+        message.get("draft_created") is True
+        for message in process_result.get("messages", [])
+    )
+
+    await supabase_upsert_onboarding_state(
+        user_id=user["id"],
+        gmail_connected=True,
+        profile_completed=True,
+        initial_sync_completed=True,
+        first_draft_generated=first_draft_generated,
+    )
+
+    return {
+        "status": "ok",
+        "email": payload.email,
+        "mailbox_status": "connected",
+        "profile_completed": True,
+        "initial_sync_completed": True,
+        "first_draft_generated": first_draft_generated,
+        "labels_created_count": len(labels_result),
+        "legacy_labels_cleaned_count": len(cleanup_result),
+        "processed_count": process_result.get("count", 0),
+        "messages": process_result.get("messages", []),
     }
 
 
