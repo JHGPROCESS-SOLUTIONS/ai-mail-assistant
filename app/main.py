@@ -599,6 +599,18 @@ def build_language_instruction_block(settings: dict[str, Any] | None, body_text:
     return "\n".join(instructions)
 
 
+def safe_parse_json(content: str) -> dict[str, Any]:
+    if not content:
+        raise ValueError("Empty content")
+
+    cleaned = content.strip()
+    cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"^```\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+
+    return json.loads(cleaned)
+
+
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
     supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
 
@@ -1890,7 +1902,7 @@ E-mail:
 
     try:
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = safe_parse_json(content)
     except Exception:
         raise HTTPException(status_code=500, detail=f"Invalid classifier response: {data}")
 
@@ -1984,7 +1996,7 @@ E-mail:
 
     try:
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = safe_parse_json(content)
     except Exception:
         raise HTTPException(status_code=500, detail=f"Invalid follow-up classifier response: {data}")
 
@@ -2120,7 +2132,7 @@ Laatste verzonden bericht:
 
     try:
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = safe_parse_json(content)
     except Exception:
         raise HTTPException(status_code=500, detail=f"Invalid sent-reply classifier response: {data}")
 
@@ -2251,7 +2263,7 @@ VOORBEELDEN:
 
     try:
         content = data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
+        parsed = safe_parse_json(content)
     except Exception:
         raise HTTPException(status_code=500, detail=f"Invalid style training response: {data}")
 
