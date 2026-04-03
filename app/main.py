@@ -505,7 +505,8 @@ def detect_language_from_text(text: str | None) -> str | None:
     ]
     spanish_markers = [
         " el ", " la ", " los ", " las ", " y ", " usted ", " ustedes ", " gracias ",
-        " presupuesto ", " entrega ",
+        " presupuesto ", " entrega ", " pedido ", " estado ", " estimado ", " saludos ",
+        " me gustaría ", " podrían ",
     ]
 
     scores = {
@@ -589,15 +590,9 @@ def build_language_instruction_block(settings: dict[str, Any] | None, body_text:
         instructions.append(f"Schrijf deze reply in {fallback_language}.")
 
     if allowed_languages:
-        instructions.append(
-            "Gebruik nooit een taal buiten de toegestane antwoordtalen."
-        )
-        instructions.append(
-            "Als de inkomende e-mail in een toegestane taal is geschreven, gebruik diezelfde taal."
-        )
-        instructions.append(
-            "Als de inkomende e-mail niet in een toegestane taal is geschreven of onduidelijk is, gebruik de primaire voorkeurstaal."
-        )
+        instructions.append("Gebruik nooit een taal buiten de toegestane antwoordtalen.")
+        instructions.append("Als de inkomende e-mail in een toegestane taal is geschreven, gebruik diezelfde taal.")
+        instructions.append("Als de inkomende e-mail niet in een toegestane taal is geschreven of onduidelijk is, gebruik de primaire voorkeurstaal.")
 
     instructions.append("Mix geen talen binnen één reply.")
 
@@ -2015,23 +2010,69 @@ Je bent een e-mail classifier voor OfficeFlow.
 Context:
 - Dit is het LAATSTE ECHT VERZONDEN bericht dat de gebruiker zelf heeft verstuurd in een thread.
 - Jij moet bepalen of de thread na dit verzonden bericht moet staan op Waiting On Reply, Follow Up of Done.
+- Wees CONSERVATIEF met Done.
+- Als er nog enige openheid, onzekerheid, vervolgstap of impliciete opvolging in de tekst zit, kies NIET Done.
 
 Kies exact 1 label uit deze lijst:
 - Waiting On Reply
 - Follow Up
 - Done
 
-Regels:
-- Waiting On Reply: de gebruiker wacht op antwoord van de andere partij; er staat een open vraag, verzoek om bevestiging of duidelijke reactie-vraag aan de ander
-- Follow Up: de gebruiker verwacht nu nog geen antwoord van de ander, maar heeft zelf aangegeven later nog iets te sturen, uit te zoeken, terug te koppelen of op te volgen
-- Done: het bericht is inhoudelijk afgerond; er is geen antwoord van de ander nodig en de gebruiker heeft ook geen open vervolgactie meer in deze thread
+Strikte definities:
+- Waiting On Reply:
+  de gebruiker wacht op een reactie, bevestiging, antwoord of actie van de andere partij.
+  Er staat een open vraag, verzoek, check of reactie-vraag richting de ander.
 
-Belangrijke voorkeuren:
-- Zinnen zoals "Ik hoor graag van u", "Kun je dit bevestigen?", "Laat je weten of dit lukt?" => Waiting On Reply
-- Zinnen zoals "Je hoort vandaag nog van me", "Ik kom hier later op terug", "Ik pak dit op en kom erop terug" => Follow Up
-- Zinnen zoals "Top, dank", "Helemaal goed", "Bedankt voor de snelle reactie", "Voor nu niet meer nodig" => Done
-- Als de gebruiker zelf zegt iets later nog te doen of sturen, kies Follow Up en NIET Done
-- Kies alleen Waiting On Reply als er echt een antwoord van de andere partij nodig is
+- Follow Up:
+  de gebruiker hoeft nu niet direct een antwoord van de ander te krijgen,
+  maar heeft zelf nog een vervolgstap, update, check, terugkoppeling of opvolging openstaan.
+
+- Done:
+  de thread is inhoudelijk echt afgerond.
+  Er is geen antwoord van de andere partij meer nodig
+  EN de gebruiker heeft ook zelf geen vervolgstap meer openstaan.
+
+ZEER BELANGRIJKE BESLISREGELS:
+- Kies Done ALLEEN als het gesprek duidelijk volledig afgerond is.
+- Als de gebruiker zegt of impliceert dat hij later nog iets laat weten, terugkoppelt, uitzoekt, checkt, opvolgt of op de hoogte houdt, kies Follow Up.
+- Als de gebruiker wacht op antwoord, bevestiging, akkoord, reactie of informatie van de ander, kies Waiting On Reply.
+- Bij twijfel NOOIT Done kiezen.
+- Bij twijfel tussen Done en Follow Up -> kies Follow Up.
+- Bij twijfel tussen Done en Waiting On Reply -> kies Waiting On Reply.
+- Bij twijfel tussen Waiting On Reply en Follow Up:
+  - kies Waiting On Reply als de ander nu aan zet is
+  - kies Follow Up als de gebruiker zelf nog aan zet is
+
+Voorbeelden die bijna altijd Follow Up zijn:
+- "Ik kom hier later op terug"
+- "Ik laat je dit nog weten"
+- "Ik check het en kom erop terug"
+- "Ik neem contact op en laat het je weten"
+- "We houden je op de hoogte"
+- "Ik stuur later nog een update"
+- "Ik zoek het uit"
+- "Ik pak dit op"
+
+Voorbeelden die bijna altijd Waiting On Reply zijn:
+- "Laat je weten of dit lukt?"
+- "Kun je dit bevestigen?"
+- "Ik hoor graag van je"
+- "Kun je aangeven wanneer..."
+- "Graag ontvang ik je reactie"
+
+Voorbeelden die bijna altijd Done zijn:
+- "Top, dank"
+- "Helemaal goed"
+- "Dank, hiermee kan ik verder"
+- "Bedankt, voor nu is alles duidelijk"
+- "Het is afgehandeld"
+- "Niet meer nodig"
+
+Extra nuance:
+- Informatieve updates zijn NIET automatisch Done.
+- Een statusupdate zoals "de bestelling is onderweg" is alleen Done als er géén open vervolg meer is.
+- Zinnen zoals "we houden je op de hoogte" of "ik laat het weten" betekenen expliciet dat de thread NIET klaar is -> Follow Up.
+- Een nette afsluiting of beleefdheid betekent niet automatisch Done.
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
@@ -2057,7 +2098,12 @@ Laatste verzonden bericht:
                 "messages": [
                     {
                         "role": "system",
-                        "content": "Je bepaalt de juiste threadstatus na een echt verzonden reply en geeft alleen geldige JSON terug.",
+                        "content": (
+                            "Je bepaalt de juiste threadstatus na een echt verzonden reply. "
+                            "Je bent streng met Done. "
+                            "Je kiest alleen Done als de thread echt volledig afgerond is. "
+                            "Je geeft alleen geldige JSON terug."
+                        ),
                     },
                     {
                         "role": "user",
