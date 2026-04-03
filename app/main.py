@@ -171,6 +171,30 @@ LABEL_COLORS = {
     },
 }
 
+LANGUAGE_NAME_MAP = {
+    "nl": "Dutch",
+    "nederlands": "Dutch",
+    "dutch": "Dutch",
+    "en": "English",
+    "engels": "English",
+    "english": "English",
+    "de": "German",
+    "duits": "German",
+    "german": "German",
+    "fr": "French",
+    "frans": "French",
+    "french": "French",
+    "es": "Spanish",
+    "spaans": "Spanish",
+    "spanish": "Spanish",
+    "it": "Italian",
+    "italiaans": "Italian",
+    "italian": "Italian",
+    "pt": "Portuguese",
+    "portugees": "Portuguese",
+    "portuguese": "Portuguese",
+}
+
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
@@ -421,6 +445,163 @@ def maybe_apply_signature(reply_text: str, settings: dict[str, Any] | None) -> s
         return reply_text.strip()
 
     return reply_text.strip()
+
+
+def split_language_tokens(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    normalized = value.replace("/", ",").replace("|", ",").replace(";", ",")
+    parts = [part.strip() for part in normalized.split(",") if part.strip()]
+    return parts
+
+
+def normalize_language_code(value: str | None) -> str | None:
+    if not value:
+        return None
+
+    cleaned = value.strip().lower()
+    return LANGUAGE_NAME_MAP.get(cleaned, cleaned)
+
+
+def get_allowed_reply_languages(preferred_language: str | None) -> list[str]:
+    tokens = split_language_tokens(preferred_language)
+    normalized: list[str] = []
+
+    for token in tokens:
+        code = normalize_language_code(token)
+        if code and code not in normalized:
+            normalized.append(code)
+
+    return normalized
+
+
+def detect_language_from_text(text: str | None) -> str | None:
+    if not text:
+        return None
+
+    lowered = f" {text.lower()} "
+
+    dutch_markers = [
+        " de ", " het ", " een ", " en ", " uw ", " je ", " jij ", " jullie ", " wij ",
+        " graag ", " alvast ", " hierbij ", " vriendelijk ", " vriendelijke ", " groet ",
+        " bedankt ", " dank ", " kunt ", " kunnen ", " vandaag ", " morgen ", " levering ",
+        " offerte ", " prijs ", " aanvraag ", " status ", " momenteel ", " behandeling ",
+        " ik ", " u ", " op de hoogte ",
+    ]
+    english_markers = [
+        " the ", " and ", " your ", " you ", " we ", " please ", " thanks ", " thank you ",
+        " regards ", " best ", " kindly ", " order ", " delivery ", " quote ", " price ",
+        " status ", " currently ", " update ", " today ", " tomorrow ", " i ", " appreciate ",
+        " looking forward ", " let me know ",
+    ]
+    german_markers = [
+        " der ", " die ", " das ", " und ", " sie ", " wir ", " danke ", " bitte ", " angebot ",
+        " lieferung ", " status ", " freundlichen ",
+    ]
+    french_markers = [
+        " le ", " la ", " les ", " et ", " vous ", " nous ", " merci ", " cordialement ",
+        " devis ", " livraison ",
+    ]
+    spanish_markers = [
+        " el ", " la ", " los ", " las ", " y ", " usted ", " ustedes ", " gracias ",
+        " presupuesto ", " entrega ",
+    ]
+
+    scores = {
+        "Dutch": sum(lowered.count(marker) for marker in dutch_markers),
+        "English": sum(lowered.count(marker) for marker in english_markers),
+        "German": sum(lowered.count(marker) for marker in german_markers),
+        "French": sum(lowered.count(marker) for marker in french_markers),
+        "Spanish": sum(lowered.count(marker) for marker in spanish_markers),
+    }
+
+    best_language = max(scores, key=scores.get)
+    best_score = scores[best_language]
+
+    if best_score <= 0:
+        return None
+
+    sorted_scores = sorted(scores.values(), reverse=True)
+    if len(sorted_scores) > 1 and best_score == sorted_scores[1]:
+        return None
+
+    return best_language
+
+
+def choose_reply_language(
+    preferred_language: str | None,
+    incoming_text: str | None,
+) -> dict[str, Any]:
+    allowed_languages = get_allowed_reply_languages(preferred_language)
+    detected_incoming_language = detect_language_from_text(incoming_text)
+
+    if not allowed_languages:
+        return {
+            "allowed_languages": [],
+            "incoming_language": detected_incoming_language,
+            "reply_language": detected_incoming_language,
+            "fallback_language": None,
+        }
+
+    fallback_language = allowed_languages[0]
+
+    if detected_incoming_language and detected_incoming_language in allowed_languages:
+        reply_language = detected_incoming_language
+    else:
+        reply_language = fallback_language
+
+    return {
+        "allowed_languages": allowed_languages,
+        "incoming_language": detected_incoming_language,
+        "reply_language": reply_language,
+        "fallback_language": fallback_language,
+    }
+
+
+def build_language_instruction_block(settings: dict[str, Any] | None, body_text: str | None) -> str:
+    preferred_language = (settings or {}).get("preferred_language")
+    language_choice = choose_reply_language(preferred_language=preferred_language, incoming_text=body_text)
+
+    allowed_languages = language_choice["allowed_languages"]
+    incoming_language = language_choice["incoming_language"]
+    reply_language = language_choice["reply_language"]
+    fallback_language = language_choice["fallback_language"]
+
+    if not allowed_languages and not reply_language:
+        return "Er zijn geen expliciete taalvoorkeuren ingesteld. Gebruik de meest natuurlijke taal voor deze reply."
+
+    instructions: list[str] = []
+
+    if allowed_languages:
+        instructions.append(
+            "Toegestane antwoordtalen: " + ", ".join(allowed_languages) + "."
+        )
+
+    if incoming_language:
+        instructions.append(f"Gedetecteerde taal van de inkomende e-mail: {incoming_language}.")
+    else:
+        instructions.append("De taal van de inkomende e-mail kon niet met zekerheid worden vastgesteld.")
+
+    if reply_language:
+        instructions.append(f"Schrijf deze reply in {reply_language}.")
+    elif fallback_language:
+        instructions.append(f"Schrijf deze reply in {fallback_language}.")
+
+    if allowed_languages:
+        instructions.append(
+            "Gebruik nooit een taal buiten de toegestane antwoordtalen."
+        )
+        instructions.append(
+            "Als de inkomende e-mail in een toegestane taal is geschreven, gebruik diezelfde taal."
+        )
+        instructions.append(
+            "Als de inkomende e-mail niet in een toegestane taal is geschreven of onduidelijk is, gebruik de primaire voorkeurstaal."
+        )
+
+    instructions.append("Mix geen talen binnen één reply.")
+
+    return "\n".join(instructions)
 
 
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
@@ -913,7 +1094,6 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
 
     instructions: list[str] = []
 
-    preferred_language = settings.get("preferred_language")
     tone_preference = settings.get("tone_preference")
     formality = settings.get("formality")
     length_preference = settings.get("length_preference")
@@ -923,13 +1103,6 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     forbidden_phrases = normalize_phrase_list(settings.get("forbidden_phrases"))
     preferred_phrases = normalize_phrase_list(settings.get("preferred_phrases"))
     custom_instructions = settings.get("custom_instructions")
-
-    if preferred_language == "nl":
-        instructions.append("Schrijf in het Nederlands.")
-    elif preferred_language == "en":
-        instructions.append("Write in English.")
-    elif preferred_language:
-        instructions.append(f"Gebruik deze taalvoorkeur: {preferred_language}")
 
     if tone_preference:
         instructions.append(f"Gewenste toon: {tone_preference}.")
@@ -2068,6 +2241,7 @@ async def generate_ai_reply(
 
     style_instructions = build_reply_style_instructions(settings)
     learned_style_instructions = build_style_profile_instructions(style_profile)
+    language_instruction_block = build_language_instruction_block(settings, body_text)
 
     prompt = f"""
 Je bent de persoonlijke e-mailassistent van de gebruiker.
@@ -2091,6 +2265,9 @@ Harde regels:
 - als een korte bevestiging genoeg is, houd het ultrakort
 - als er nog iets moet volgen, formuleer dat concreet
 - als er geen handtekening bekend is, laat die weg
+
+Taalregels:
+{language_instruction_block}
 
 Vermijd expliciet dit soort formuleringen:
 - "Bedankt voor je vraag"
@@ -2136,7 +2313,8 @@ Originele e-mail:
     system_message = (
         "Je schrijft extreem natuurlijke, korte zakelijke replies. "
         "Je klinkt als een drukke professional, niet als een AI-assistent. "
-        "Je output bevat alleen de uiteindelijke mailtekst."
+        "Je output bevat alleen de uiteindelijke mailtekst. "
+        "Je volgt taalrestricties strikt op."
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
