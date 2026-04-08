@@ -430,43 +430,46 @@ def sanitize_generated_reply(reply: str | None) -> str:
     return text
 
 
+def strip_trailing_generic_signoff(reply_text: str) -> str:
+    if not reply_text:
+        return ""
+
+    text = reply_text.strip()
+
+    generic_signoffs = [
+        r"(?:\n\s*)?met vriendelijke groet,?\s*$",
+        r"(?:\n\s*)?vriendelijke groet,?\s*$",
+        r"(?:\n\s*)?groet,?\s*$",
+        r"(?:\n\s*)?groeten,?\s*$",
+        r"(?:\n\s*)?kind regards,?\s*$",
+        r"(?:\n\s*)?best regards,?\s*$",
+        r"(?:\n\s*)?regards,?\s*$",
+        r"(?:\n\s*)?best,?\s*$",
+    ]
+
+    changed = True
+    while changed:
+        changed = False
+        for pattern in generic_signoffs:
+            updated = re.sub(pattern, "", text, flags=re.IGNORECASE).strip()
+            if updated != text:
+                text = updated
+                changed = True
+
+    return text
+
+
 def maybe_apply_signature(reply_text: str, settings: dict[str, Any] | None) -> str:
     if not reply_text:
         return ""
 
-    reply = reply_text.strip()
-
-    signature_mode = (settings or {}).get("signature_mode")
-    signature_text = (settings or {}).get("signature_text")
-
-    # Geen signature
-    if signature_mode in {None, "", "none"}:
-        return reply
-
-    # Alleen toevoegen als we echt een signature hebben
-    if signature_mode == "full_signature" and signature_text:
-        return f"{reply}\n\n{signature_text.strip()}"
-
-    return reply
-
-    cleaned_reply = reply_text.strip()
+    cleaned_reply = strip_trailing_generic_signoff(reply_text.strip())
     signature_text = normalize_string((settings or {}).get("signature_text"))
 
     if signature_text:
         if signature_text in cleaned_reply:
             return cleaned_reply
         return f"{cleaned_reply}\n\n{signature_text}"
-
-    signature_mode = (settings or {}).get("signature_mode")
-
-    if signature_mode in {None, "", "none"}:
-        return cleaned_reply
-
-    if signature_mode == "include_name":
-        return cleaned_reply
-
-    if signature_mode == "full_signature":
-        return cleaned_reply
 
     return cleaned_reply
 
@@ -1149,7 +1152,7 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     if cta_preference:
         instructions.append(f"Call-to-action voorkeur: {cta_preference}.")
     if signature_text:
-        instructions.append("Er is een vaste handtekening opgeslagen. Voeg zelf geen alternatieve of placeholder-handtekening toe.")
+        instructions.append("Er is een vaste handtekening opgeslagen. Voeg zelf geen alternatieve handtekening, losse afsluitgroet of placeholdernaam toe; de vaste handtekening wordt later automatisch toegevoegd.")
     elif signature_mode in {"none", None, ""}:
         instructions.append("Voeg geen handtekening toe.")
     elif signature_mode == "include_name":
@@ -2343,14 +2346,16 @@ Harde regels:
 - schrijf NOOIT "Onderwerp:" of "Subject:"
 - gebruik GEEN placeholders zoals "[je naam]" of "[your name]"
 - noem NOOIT "OfficeFlow"
-- verzin geen details, prijzen, data of beloftes die niet in de mail staan
+- verzin geen details, prijzen, data, deadlines of beloftes die niet in de mail of instructies staan
+- doe geen concrete toezeggingen over timing, planning, prijs of oplevering tenzij die expliciet bekend zijn
 - houd het bij maximaal 2 tot 4 korte zinnen
 - kom direct tot de kern
 - gebruik geen wollige openingszinnen
 - gebruik geen typische AI-zinnen
 - schrijf natuurlijk, menselijk, kort en geloofwaardig
 - als een korte bevestiging genoeg is, houd het ultrakort
-- als er nog iets moet volgen, formuleer dat concreet
+- als er nog iets moet volgen, formuleer dat concreet maar zonder iets te beloven dat niet vaststaat
+- als er een vaste handtekening bekend is, schrijf zelf geen losse afsluitgroet; die wordt later toegevoegd
 - als er geen handtekening bekend is, laat die weg
 
 Taalregels:
@@ -2376,7 +2381,9 @@ Voorkeursstijl:
 
 Specifieke instructie voor inhoud:
 - als iemand om een offerte, prijs of indicatie vraagt, geef een korte directe terugkoppeling zonder overbodige woorden
-- voorbeeldstijl: "Ik stuur je vandaag nog een prijsindicatie."
+- doe NOOIT concrete tijdsbeloftes zoals "vandaag", "straks", "vanmiddag", "binnen een uur" of andere deadlines tenzij die expliciet vaststaan in de input of gebruikersinstructies
+- verzin nooit prijzen, timings, oplevertermijnen of toezeggingen
+- goede stijl is bijvoorbeeld: "Ik kom bij je terug met een prijsindicatie en een inschatting van de doorlooptijd."
 - dus liever 1 sterke zin dan 3 middelmatige zinnen
 
 Gebruikersvoorkeuren:
@@ -2400,6 +2407,8 @@ Originele e-mail:
     system_message = (
         "Je schrijft extreem natuurlijke, korte zakelijke replies. "
         "Je klinkt als een drukke professional, niet als een AI-assistent. "
+        "Je doet geen ongegronde beloftes over tijd, prijs, planning of oplevering. "
+        "Je verzint geen details. "
         "Je output bevat alleen de uiteindelijke mailtekst. "
         "Je volgt taalrestricties strikt op."
     )
@@ -2423,7 +2432,7 @@ Originele e-mail:
                         "content": prompt,
                     },
                 ],
-                "temperature": 0.35,
+                "temperature": 0.2,
             },
         )
 
