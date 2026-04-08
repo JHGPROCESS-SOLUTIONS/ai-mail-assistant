@@ -208,6 +208,7 @@ class PromptSettingsPayload(BaseModel):
     emoji_preference: bool | None = None
     cta_preference: str | None = None
     signature_mode: str | None = None
+    signature_text: str | None = None
     forbidden_phrases: list[str] | str | None = None
     preferred_phrases: list[str] | str | None = None
     custom_instructions: str | None = None
@@ -433,18 +434,26 @@ def maybe_apply_signature(reply_text: str, settings: dict[str, Any] | None) -> s
     if not reply_text:
         return ""
 
+    cleaned_reply = reply_text.strip()
+    signature_text = normalize_string((settings or {}).get("signature_text"))
+
+    if signature_text:
+        if signature_text in cleaned_reply:
+            return cleaned_reply
+        return f"{cleaned_reply}\n\n{signature_text}"
+
     signature_mode = (settings or {}).get("signature_mode")
 
     if signature_mode in {None, "", "none"}:
-        return reply_text.strip()
+        return cleaned_reply
 
     if signature_mode == "include_name":
-        return reply_text.strip()
+        return cleaned_reply
 
     if signature_mode == "full_signature":
-        return reply_text.strip()
+        return cleaned_reply
 
-    return reply_text.strip()
+    return cleaned_reply
 
 
 def split_language_tokens(value: str | None) -> list[str]:
@@ -1107,6 +1116,7 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     emoji_preference = settings.get("emoji_preference")
     cta_preference = settings.get("cta_preference")
     signature_mode = settings.get("signature_mode")
+    signature_text = normalize_string(settings.get("signature_text"))
     forbidden_phrases = normalize_phrase_list(settings.get("forbidden_phrases"))
     preferred_phrases = normalize_phrase_list(settings.get("preferred_phrases"))
     custom_instructions = settings.get("custom_instructions")
@@ -1123,7 +1133,9 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
         instructions.append("Gebruik alleen spaarzaam emoji als dat natuurlijk voelt.")
     if cta_preference:
         instructions.append(f"Call-to-action voorkeur: {cta_preference}.")
-    if signature_mode in {"none", None, ""}:
+    if signature_text:
+        instructions.append("Er is een vaste handtekening opgeslagen. Voeg zelf geen alternatieve of placeholder-handtekening toe.")
+    elif signature_mode in {"none", None, ""}:
         instructions.append("Voeg geen handtekening toe.")
     elif signature_mode == "include_name":
         instructions.append("Houd de afsluiting minimaal. Voeg geen placeholdernaam toe.")
@@ -1191,6 +1203,7 @@ def build_clean_settings_payload(payload: PromptSettingsPayload) -> dict[str, An
     length_preference = normalize_string(payload.length_preference)
     cta_preference = normalize_string(payload.cta_preference)
     signature_mode = normalize_string(payload.signature_mode)
+    signature_text = normalize_string(payload.signature_text)
     custom_instructions = normalize_string(payload.custom_instructions)
 
     forbidden_phrases = normalize_phrase_list(payload.forbidden_phrases)
@@ -1210,6 +1223,7 @@ def build_clean_settings_payload(payload: PromptSettingsPayload) -> dict[str, An
         "emoji_preference": payload.emoji_preference,
         "cta_preference": cta_preference,
         "signature_mode": signature_mode,
+        "signature_text": signature_text,
         "forbidden_phrases": forbidden_phrases,
         "preferred_phrases": preferred_phrases,
         "custom_instructions": custom_instructions,
