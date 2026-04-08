@@ -1137,28 +1137,54 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     signature_text = normalize_string(settings.get("signature_text"))
     forbidden_phrases = normalize_phrase_list(settings.get("forbidden_phrases"))
     preferred_phrases = normalize_phrase_list(settings.get("preferred_phrases"))
-    custom_instructions = settings.get("custom_instructions")
+    custom_instructions = normalize_string(settings.get("custom_instructions"))
 
     if tone_preference:
         instructions.append(f"Gewenste toon: {tone_preference}.")
     if formality:
         instructions.append(f"Gewenste formaliteit: {formality}.")
-    if length_preference:
+
+    if length_preference == "kort":
+        instructions.append(
+            "Gewenste lengte: kort. Houd het bij 1 tot 2 korte zinnen als dat voldoende is."
+        )
+    elif length_preference == "gemiddeld":
+        instructions.append(
+            "Gewenste lengte: gemiddeld. Geef een volledig maar compact antwoord, meestal 2 tot 4 zinnen."
+        )
+    elif length_preference == "uitgebreid":
+        instructions.append(
+            "Gewenste lengte: uitgebreid. Je mag uitgebreider antwoorden als dat nuttig is, zolang het relevant en concreet blijft."
+        )
+    elif length_preference:
         instructions.append(f"Gewenste lengte: {length_preference}.")
+
     if emoji_preference is False:
         instructions.append("Gebruik geen emoji.")
     elif emoji_preference is True:
         instructions.append("Gebruik alleen spaarzaam emoji als dat natuurlijk voelt.")
+
     if cta_preference:
         instructions.append(f"Call-to-action voorkeur: {cta_preference}.")
+
     if signature_text:
-        instructions.append("Er is een vaste handtekening opgeslagen. Voeg zelf geen alternatieve handtekening, losse afsluitgroet of placeholdernaam toe; de vaste handtekening wordt later automatisch toegevoegd.")
+        instructions.append(
+            "Er is een vaste handtekening opgeslagen. Voeg zelf geen alternatieve handtekening, losse afsluitgroet of placeholdernaam toe; de vaste handtekening wordt later automatisch toegevoegd."
+        )
     elif signature_mode in {"none", None, ""}:
         instructions.append("Voeg geen handtekening toe.")
     elif signature_mode == "include_name":
         instructions.append("Houd de afsluiting minimaal. Voeg geen placeholdernaam toe.")
     elif signature_mode == "full_signature":
         instructions.append("Gebruik alleen een handtekening als die expliciet bekend is. Gebruik nooit placeholders.")
+
+    instructions.append(
+        "Verwijs nooit naar websites, pagina's of externe informatie tenzij dat expliciet gevraagd wordt in de e-mail of expliciet is ingesteld door de gebruiker."
+    )
+    instructions.append(
+        "Voeg nooit extra informatie toe die niet gevraagd is."
+    )
+
     if forbidden_phrases:
         instructions.append(
             f"Gebruik deze formuleringen niet: {phrase_list_to_prompt_text(forbidden_phrases)}."
@@ -2338,22 +2364,21 @@ Je bent de persoonlijke e-mailassistent van de gebruiker.
 
 Jouw taak:
 - schrijf ALLEEN de body van een reply
-- schrijf alsof de gebruiker zelf snel antwoordt
+- schrijf alsof de gebruiker zelf antwoordt
 - maak het bruikbaar als echte conceptmail in Gmail
 
 Harde regels:
 - schrijf GEEN onderwerpregel
 - schrijf NOOIT "Onderwerp:" of "Subject:"
 - gebruik GEEN placeholders zoals "[je naam]" of "[your name]"
-- noem NOOIT "OfficeFlow"
+- noem NOOIT "OfficeFlow", tenzij dit expliciet nodig is vanuit de e-mail of gebruikersinstructies
 - verzin geen details, prijzen, data, deadlines of beloftes die niet in de mail of instructies staan
 - doe geen concrete toezeggingen over timing, planning, prijs of oplevering tenzij die expliciet bekend zijn
-- houd het bij maximaal 2 tot 4 korte zinnen
-- kom direct tot de kern
-- gebruik geen wollige openingszinnen
-- gebruik geen typische AI-zinnen
-- schrijf natuurlijk, menselijk, kort en geloofwaardig
-- als een korte bevestiging genoeg is, houd het ultrakort
+- voeg NOOIT extra informatie toe die niet expliciet gevraagd wordt
+- verwijs NOOIT naar websites, pagina's of externe informatie tenzij dat expliciet gevraagd wordt in de e-mail of expliciet is ingesteld door de gebruiker
+- schrijf natuurlijk, menselijk, geloofwaardig en direct
+- als een korte bevestiging genoeg is, houd het kort
+- als er meer context nodig is en de gebruiker heeft voorkeur voor langere antwoorden, mag je uitgebreider zijn zolang het relevant blijft
 - als er nog iets moet volgen, formuleer dat concreet maar zonder iets te beloven dat niet vaststaat
 - als er een vaste handtekening bekend is, schrijf zelf geen losse afsluitgroet; die wordt later toegevoegd
 - als er geen handtekening bekend is, laat die weg
@@ -2373,18 +2398,20 @@ Vermijd expliciet dit soort formuleringen:
 - "Hierbij"
 
 Voorkeursstijl:
-- kort
 - direct
-- rustig zelfverzekerd
 - zakelijk menselijk
 - geen overdreven beleefdheidsvulling
+- geen marketingtaal
+- geen opvulzinnen
 
 Specifieke instructie voor inhoud:
-- als iemand om een offerte, prijs of indicatie vraagt, geef een korte directe terugkoppeling zonder overbodige woorden
+- als iemand om een offerte, prijs of indicatie vraagt, geef een korte of passende directe terugkoppeling zonder overbodige woorden
 - doe NOOIT concrete tijdsbeloftes zoals "vandaag", "straks", "vanmiddag", "binnen een uur" of andere deadlines tenzij die expliciet vaststaan in de input of gebruikersinstructies
 - verzin nooit prijzen, timings, oplevertermijnen of toezeggingen
+- als de gebruiker voorkeur voor korte antwoorden heeft, houd het compact
+- als de gebruiker voorkeur voor langere antwoorden heeft, mag je vollediger antwoorden, maar blijf relevant en to the point
 - goede stijl is bijvoorbeeld: "Ik kom bij je terug met een prijsindicatie en een inschatting van de doorlooptijd."
-- dus liever 1 sterke zin dan 3 middelmatige zinnen
+- dus liever 1 sterk relevant antwoord dan extra zinnen die niets toevoegen
 
 Gebruikersvoorkeuren:
 {style_instructions if style_instructions else "Geen extra voorkeuren ingesteld."}
@@ -2405,12 +2432,12 @@ Originele e-mail:
 """.strip()
 
     system_message = (
-        "Je schrijft extreem natuurlijke, korte zakelijke replies. "
-        "Je klinkt als een drukke professional, niet als een AI-assistent. "
-        "Je doet geen ongegronde beloftes over tijd, prijs, planning of oplevering. "
+        "Je schrijft natuurlijke zakelijke replies namens de gebruiker. "
         "Je verzint geen details. "
-        "Je output bevat alleen de uiteindelijke mailtekst. "
-        "Je volgt taalrestricties strikt op."
+        "Je doet geen ongegronde beloftes over tijd, prijs, planning of oplevering. "
+        "Je voegt geen irrelevante extra informatie toe. "
+        "Je verwijst niet naar websites tenzij dat expliciet gevraagd of ingesteld is. "
+        "Je output bevat alleen de uiteindelijke mailtekst."
     )
 
     async with httpx.AsyncClient(timeout=60.0) as client:
