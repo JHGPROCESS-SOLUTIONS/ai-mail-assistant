@@ -434,6 +434,21 @@ def maybe_apply_signature(reply_text: str, settings: dict[str, Any] | None) -> s
     if not reply_text:
         return ""
 
+    reply = reply_text.strip()
+
+    signature_mode = (settings or {}).get("signature_mode")
+    signature_text = (settings or {}).get("signature_text")
+
+    # Geen signature
+    if signature_mode in {None, "", "none"}:
+        return reply
+
+    # Alleen toevoegen als we echt een signature hebben
+    if signature_mode == "full_signature" and signature_text:
+        return f"{reply}\n\n{signature_text.strip()}"
+
+    return reply
+
     cleaned_reply = reply_text.strip()
     signature_text = normalize_string((settings or {}).get("signature_text"))
 
