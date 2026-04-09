@@ -602,9 +602,7 @@ def build_language_instruction_block(settings: dict[str, Any] | None, body_text:
     instructions: list[str] = []
 
     if allowed_languages:
-        instructions.append(
-            "Toegestane antwoordtalen: " + ", ".join(allowed_languages) + "."
-        )
+        instructions.append("Toegestane antwoordtalen: " + ", ".join(allowed_languages) + ".")
 
     if incoming_language:
         instructions.append(f"Gedetecteerde taal van de inkomende e-mail: {incoming_language}.")
@@ -1181,9 +1179,7 @@ def build_reply_style_instructions(settings: dict[str, Any] | None) -> str:
     instructions.append(
         "Verwijs nooit naar websites, pagina's of externe informatie tenzij dat expliciet gevraagd wordt in de e-mail of expliciet is ingesteld door de gebruiker."
     )
-    instructions.append(
-        "Voeg nooit extra informatie toe die niet gevraagd is."
-    )
+    instructions.append("Voeg nooit extra informatie toe die niet gevraagd is.")
 
     if forbidden_phrases:
         instructions.append(
@@ -2483,6 +2479,100 @@ Originele e-mail:
 # Processing engine
 # ----------------------------
 
+async def process_open_to_respond_threads(
+    user_id: str,
+    mailbox_email: str | None,
+    label_name_to_id: dict[str, str],
+    max_results: int = 25,
+) -> list[dict[str, Any]]:
+    to_respond_label_id = label_name_to_id.get("To Respond")
+    if not to_respond_label_id:
+        return []
+
+    gmail_data = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/messages",
+        params={
+            "maxResults": max_results,
+            "labelIds": to_respond_label_id,
+        },
+    )
+
+    messages = gmail_data.get("messages", [])
+    processed_thread_ids: set[str] = set()
+    results: list[dict[str, Any]] = []
+
+    for message in messages:
+        message_id = message.get("id")
+        if not message_id:
+            continue
+
+        message_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/messages/{message_id}",
+        )
+
+        thread_id = message_data.get("threadId")
+        if not thread_id or thread_id in processed_thread_ids:
+            continue
+
+        processed_thread_ids.add(thread_id)
+
+        current_label_ids = set(message_data.get("labelIds", []))
+        if to_respond_label_id not in current_label_ids:
+            continue
+
+        thread_reply_state = await get_thread_reply_state(
+            user_id=user_id,
+            thread_id=thread_id,
+            mailbox_email=mailbox_email,
+        )
+
+        latest_user_message = thread_reply_state.get("latest_user_message")
+        has_open_draft = thread_reply_state.get("has_open_draft", False)
+
+        if not latest_user_message or has_open_draft:
+            continue
+
+        if not thread_reply_state["user_is_latest_sender"]:
+            continue
+
+        latest_user_payload = latest_user_message.get("payload", {})
+        latest_user_headers = latest_user_payload.get("headers", [])
+        latest_user_subject = get_header_value(latest_user_headers, "Subject")
+        latest_user_body_text = extract_plain_text_from_payload(latest_user_payload)
+
+        sent_status = await classify_latest_sent_reply_status(
+            subject=latest_user_subject,
+            body_text=latest_user_body_text,
+        )
+        target_label = sent_status["label"]
+
+        updated_label_ids = await sync_thread_status(
+            user_id=user_id,
+            thread_id=thread_id,
+            current_message_id=message_id,
+            current_label_ids=current_label_ids,
+            label_name_to_id=label_name_to_id,
+            target_label_name=target_label,
+        )
+
+        results.append(
+            {
+                "gmail_message_id": message_id,
+                "gmail_thread_id": thread_id,
+                "label": target_label,
+                "classification_reason": sent_status["reason"],
+                "draft_created": False,
+                "gmail_draft_id": None,
+                "label_ids": list(updated_label_ids),
+                "thread_status": "updated_after_sent_reply",
+            }
+        )
+
+    return results
+
+
 async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str, Any]:
     context = await get_gmail_context_by_email(email)
     user = context["user"]
@@ -2503,17 +2593,19 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
     label_name_to_id = {name: label["id"] for name, label in label_map.items()}
     custom_label_ids = get_status_label_ids_from_map(label_name_to_id)
 
+    results: list[dict[str, Any]] = []
+
+    # 1) Alleen nieuwe/ongelezen inbox mails verwerken
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
         url=f"{GMAIL_API_BASE}/messages",
         params={
             "maxResults": max_results,
-            "labelIds": "INBOX",
+            "q": "in:inbox is:unread",
         },
     )
 
     messages = gmail_data.get("messages", [])
-    results: list[dict[str, Any]] = []
 
     for message in messages:
         message_id = message.get("id")
@@ -2535,6 +2627,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         references_header = get_header_value(headers, "References")
         thread_id = message_data.get("threadId")
         current_label_ids = set(message_data.get("labelIds", []))
+
         has_any_custom_label = any(label_id in current_label_ids for label_id in custom_label_ids)
 
         email_row = await supabase_insert_email(
@@ -2547,20 +2640,38 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
         existing_drafts = await supabase_get_drafts_by_email_id(email_row["id"]) if email_row else []
 
+        # Als deze unread mail al eerder verwerkt is, sla hem over
+        if has_any_custom_label or existing_drafts:
+            results.append(
+                {
+                    "gmail_message_id": message_data.get("id"),
+                    "gmail_thread_id": thread_id,
+                    "subject": subject,
+                    "from_name": from_header,
+                    "from_email": extract_email_address(from_header),
+                    "snippet": message_data.get("snippet"),
+                    "body_text": body_text[:500] if body_text else None,
+                    "label_ids": list(current_label_ids),
+                    "label": None,
+                    "generate_draft": False,
+                    "classification_reason": "Skipped: already processed",
+                    "draft_created": False,
+                    "gmail_draft_id": None,
+                    "already_had_label": has_any_custom_label,
+                    "thread_status": "skipped_already_processed",
+                    "has_open_draft": bool(existing_drafts),
+                }
+            )
+            continue
+
         thread_reply_state = await get_thread_reply_state(
             user_id=user["id"],
             thread_id=thread_id,
             mailbox_email=mailbox_email,
         )
 
-        latest_user_message = thread_reply_state.get("latest_user_message")
         latest_incoming_message = thread_reply_state.get("latest_incoming_message")
         has_open_draft = thread_reply_state.get("has_open_draft", False)
-
-        latest_user_payload = latest_user_message.get("payload", {}) if latest_user_message else {}
-        latest_user_headers = latest_user_payload.get("headers", []) if latest_user_message else []
-        latest_user_subject = get_header_value(latest_user_headers, "Subject")
-        latest_user_body_text = extract_plain_text_from_payload(latest_user_payload) if latest_user_message else None
 
         latest_incoming_payload = latest_incoming_message.get("payload", {}) if latest_incoming_message else {}
         latest_incoming_headers = latest_incoming_payload.get("headers", []) if latest_incoming_message else []
@@ -2572,55 +2683,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         is_social_tab = "CATEGORY_SOCIAL" in current_label_ids
         is_updates_tab = "CATEGORY_UPDATES" in current_label_ids
 
-        if (
-            thread_reply_state["user_is_latest_sender"]
-            and latest_user_message is not None
-            and not has_open_draft
-        ):
-            sent_status = await classify_latest_sent_reply_status(
-                subject=latest_user_subject or subject,
-                body_text=latest_user_body_text,
-            )
-            target_label = sent_status["label"]
-
-            current_label_ids = await sync_thread_status(
-                user_id=user["id"],
-                thread_id=thread_id,
-                current_message_id=message_id,
-                current_label_ids=current_label_ids,
-                label_name_to_id=label_name_to_id,
-                target_label_name=target_label,
-            )
-
-            if target_label == "Waiting On Reply":
-                thread_status = "waiting_on_reply"
-            elif target_label == "Follow Up":
-                thread_status = "follow_up"
-            else:
-                thread_status = "done_after_sent_reply"
-
-            results.append(
-                {
-                    "gmail_message_id": message_data.get("id"),
-                    "gmail_thread_id": message_data.get("threadId"),
-                    "subject": subject,
-                    "from_name": from_header,
-                    "from_email": extract_email_address(from_header),
-                    "snippet": message_data.get("snippet"),
-                    "body_text": body_text[:500] if body_text else None,
-                    "label_ids": list(current_label_ids),
-                    "label": target_label,
-                    "generate_draft": False,
-                    "classification_reason": sent_status["reason"],
-                    "draft_created": False,
-                    "gmail_draft_id": None,
-                    "already_had_label": has_any_custom_label,
-                    "thread_status": thread_status,
-                    "has_open_draft": has_open_draft,
-                }
-            )
-            continue
-
+        # Alleen follow-up classificatie als er echt eerder een user reply in de thread zat
         if thread_reply_state["needs_response_after_reply"] and latest_incoming_message is not None:
             classification = await classify_follow_up_email(
                 subject=latest_incoming_subject or subject,
@@ -2654,6 +2717,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             and not is_marketing_tab
             and not is_social_tab
             and not is_updates_tab
+            and not has_open_draft
         )
 
         draft_created = False
@@ -2721,6 +2785,15 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "has_open_draft": has_open_draft,
             }
         )
+
+    # 2) Alleen open To Respond threads opnieuw beoordelen als gebruiker echt gereageerd heeft
+    updated_open_threads = await process_open_to_respond_threads(
+        user_id=user["id"],
+        mailbox_email=mailbox_email,
+        label_name_to_id=label_name_to_id,
+        max_results=max(max_results, 20),
+    )
+    results.extend(updated_open_threads)
 
     return {
         "status": "ok",
