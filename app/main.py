@@ -63,6 +63,10 @@ FRONTEND_PRICING_URL = os.getenv(
 
 STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+STRIPE_BILLING_PORTAL_RETURN_URL = os.getenv(
+    "STRIPE_BILLING_PORTAL_RETURN_URL",
+    "https://officeflowcompany.com/settings",
+)
 
 AUTO_PROCESS_ENABLED = os.getenv("AUTO_PROCESS_ENABLED", "true").lower() == "true"
 AUTO_PROCESS_INTERVAL_SECONDS = int(os.getenv("AUTO_PROCESS_INTERVAL_SECONDS", "60"))
@@ -811,6 +815,21 @@ async def ensure_user_has_access(email: str) -> dict[str, Any]:
             raise HTTPException(status_code=403, detail="Active subscription required")
         if subscription_status and subscription_status not in ALLOWED_SUBSCRIPTION_STATUSES:
             raise HTTPException(status_code=403, detail="Active subscription required")
+
+    return user
+
+
+async def get_user_for_billing(email: str) -> dict[str, Any]:
+    if not email:
+        raise HTTPException(status_code=401, detail="Missing user email")
+
+    user = await supabase_get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=404, detail="No user record found")
+
+    stripe_customer_id = user.get("stripe_customer_id")
+    if not stripe_customer_id:
+        raise HTTPException(status_code=400, detail="No Stripe customer found")
 
     return user
 
@@ -2907,6 +2926,24 @@ async def billing_status(email: str):
     }
 
 
+@app.post("/billing/portal")
+async def create_billing_portal(email: str = Body(...)):
+    user = await get_user_for_billing(email)
+
+    try:
+        session = stripe.billing_portal.Session.create(
+            customer=user["stripe_customer_id"],
+            return_url=STRIPE_BILLING_PORTAL_RETURN_URL,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create billing portal session: {str(exc)}")
+
+    return {
+        "status": "ok",
+        "url": session.url,
+    }
+
+
 @app.get("/auth/google/start")
 def google_login():
     client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
@@ -3435,6 +3472,16 @@ async def stripe_webhook(request: Request):
                         stripe_customer_id=customer_id,
                         stripe_subscription_id=subscription_id,
                     )
+
+                    mailbox = await supabase_get_mailbox_by_user_id(
+                        user_id=user["id"],
+                        provider="gmail",
+                    )
+                    if mailbox:
+                        await supabase_update_mailbox_status(
+                            mailbox_id=mailbox["id"],
+                            status="canceled",
+                        )
 
         return {"received": True}
 
