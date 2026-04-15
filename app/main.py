@@ -3399,6 +3399,13 @@ async def train_style_profile(
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
 
+    def stripe_obj_get(obj: Any, key: str, default: Any = None) -> Any:
+        if obj is None:
+            return default
+        if isinstance(obj, dict):
+            return obj.get(key, default)
+        return getattr(obj, key, default)
+
     try:
         payload = await request.body()
         sig_header = request.headers.get("stripe-signature")
@@ -3420,11 +3427,11 @@ async def stripe_webhook(request: Request):
 
         if event_type == "checkout.session.completed":
             email = (
-                getattr(data, "customer_email", None)
-                or getattr(data, "client_reference_id", None)
+                stripe_obj_get(data, "customer_email")
+                or stripe_obj_get(data, "client_reference_id")
             )
-            customer_id = getattr(data, "customer", None)
-            subscription_id = getattr(data, "subscription", None)
+            customer_id = stripe_obj_get(data, "customer")
+            subscription_id = stripe_obj_get(data, "subscription")
 
             if not email:
                 return {"received": True}
@@ -3442,25 +3449,43 @@ async def stripe_webhook(request: Request):
             )
 
         elif event_type == "customer.subscription.updated":
-            status = getattr(data, "status", None)
-            customer_id = getattr(data, "customer", None)
-            subscription_id = getattr(data, "id", None)
+            status = stripe_obj_get(data, "status")
+            customer_id = stripe_obj_get(data, "customer")
+            subscription_id = stripe_obj_get(data, "id")
+            cancel_at_period_end = bool(stripe_obj_get(data, "cancel_at_period_end", False))
 
             if customer_id:
                 user = await supabase_get_user_by_stripe_customer_id(customer_id)
                 if user:
-                    access_allowed = status in ALLOWED_SUBSCRIPTION_STATUSES
+                    if cancel_at_period_end and status in ALLOWED_SUBSCRIPTION_STATUSES:
+                        normalized_status = "canceling"
+                        access_allowed = True
+                    else:
+                        normalized_status = status
+                        access_allowed = status in ALLOWED_SUBSCRIPTION_STATUSES
+
                     await supabase_update_user_subscription(
                         user_id=user["id"],
-                        subscription_status=status,
+                        subscription_status=normalized_status,
                         access_allowed=access_allowed,
                         stripe_customer_id=customer_id,
                         stripe_subscription_id=subscription_id,
                     )
 
+                    mailbox = await supabase_get_mailbox_by_user_id(
+                        user_id=user["id"],
+                        provider="gmail",
+                    )
+                    if mailbox:
+                        mailbox_status = "connected" if access_allowed else "canceled"
+                        await supabase_update_mailbox_status(
+                            mailbox_id=mailbox["id"],
+                            status=mailbox_status,
+                        )
+
         elif event_type == "customer.subscription.deleted":
-            customer_id = getattr(data, "customer", None)
-            subscription_id = getattr(data, "id", None)
+            customer_id = stripe_obj_get(data, "customer")
+            subscription_id = stripe_obj_get(data, "id")
 
             if customer_id:
                 user = await supabase_get_user_by_stripe_customer_id(customer_id)
@@ -3489,5 +3514,5 @@ async def stripe_webhook(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe signature"})
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe payload"})
-    except Exception:
-        return JSONResponse(status_code=500, content={"error": "Webhook handler failed"})
+    except Exception as exc:
+        return JSONResponse(status_code=500, content={"error": f"Webhook handler failed: {str(exc)}"})
