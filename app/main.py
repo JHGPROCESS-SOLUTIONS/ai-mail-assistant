@@ -74,7 +74,7 @@ AUTO_PROCESS_MAX_RESULTS = int(os.getenv("AUTO_PROCESS_MAX_RESULTS", "10"))
 
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing"}
+ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing", "canceling"}
 
 LABELS = [
     "Priority",
@@ -2504,20 +2504,32 @@ async def process_open_to_respond_threads(
     label_name_to_id: dict[str, str],
     max_results: int = 25,
 ) -> list[dict[str, Any]]:
-    to_respond_label_id = label_name_to_id.get("To Respond")
-    if not to_respond_label_id:
+    label_ids_to_scan = [
+        label_name_to_id[name]
+        for name in ("To Respond", "Priority")
+        if label_name_to_id.get(name)
+    ]
+    if not label_ids_to_scan:
         return []
 
-    gmail_data = await gmail_get_json_for_user(
-        user_id=user_id,
-        url=f"{GMAIL_API_BASE}/messages",
-        params={
-            "maxResults": max_results,
-            "labelIds": to_respond_label_id,
-        },
-    )
+    seen_message_ids: set[str] = set()
+    messages: list[dict[str, Any]] = []
+    for label_id in label_ids_to_scan:
+        gmail_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/messages",
+            params={
+                "maxResults": max_results,
+                "labelIds": label_id,
+            },
+        )
+        for message in gmail_data.get("messages", []):
+            message_id = message.get("id")
+            if not message_id or message_id in seen_message_ids:
+                continue
+            seen_message_ids.add(message_id)
+            messages.append(message)
 
-    messages = gmail_data.get("messages", [])
     processed_thread_ids: set[str] = set()
     results: list[dict[str, Any]] = []
 
@@ -2538,7 +2550,7 @@ async def process_open_to_respond_threads(
         processed_thread_ids.add(thread_id)
 
         current_label_ids = set(message_data.get("labelIds", []))
-        if to_respond_label_id not in current_label_ids:
+        if not any(lid in current_label_ids for lid in label_ids_to_scan):
             continue
 
         thread_reply_state = await get_thread_reply_state(
@@ -3309,6 +3321,19 @@ async def onboarding_complete(payload: OnboardingCompletePayload):
         first_draft_generated=existing_first_draft_generated,
     )
 
+    # Train style profile op basis van SENT mail, indien aangezet door user
+    settings = await supabase_get_user_settings(user["id"])
+    if settings and settings.get("style_learning_enabled"):
+        try:
+            await train_style_profile_from_sent_messages(
+                user_id=user["id"],
+                source_limit=settings.get("style_learning_source_limit") or 20,
+            )
+        except HTTPException:
+            pass
+        except Exception as exc:
+            print(f"Style profile training skipped: {repr(exc)}")
+
     labels_result = await setup_gmail_labels_for_mailbox(
         user_id=user["id"],
         mailbox_id=mailbox["id"],
@@ -3516,3 +3541,4 @@ async def stripe_webhook(request: Request):
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe payload"})
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"Webhook handler failed: {str(exc)}"})
+
