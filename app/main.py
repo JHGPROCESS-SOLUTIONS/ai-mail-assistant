@@ -1523,7 +1523,15 @@ async def modify_gmail_message_labels(
 
 async def ensure_label_exists(user_id: str, label_name: str) -> str:
     current_labels = await get_all_gmail_labels(user_id)
+
+    # Exact match first, then case-insensitive fallback
     existing = current_labels.get(label_name)
+    if not existing:
+        for name, label in current_labels.items():
+            if name.lower() == label_name.lower():
+                existing = label
+                break
+
     if existing:
         label_id = existing["id"]
         color = LABEL_COLORS.get(label_name)
@@ -1555,21 +1563,39 @@ async def ensure_label_exists(user_id: str, label_name: str) -> str:
             "backgroundColor": color["backgroundColor"],
         }
 
+    def is_conflict_error(exc: Exception) -> bool:
+        return "409" in str(exc) or "Label name exists" in str(exc)
+
+    async def find_label_after_conflict() -> str:
+        refreshed = await get_all_gmail_labels(user_id)
+        for name, label in refreshed.items():
+            if name.lower() == label_name.lower():
+                return label["id"]
+        raise HTTPException(status_code=500, detail=f"Label '{label_name}' conflict but not found after refresh")
+
     try:
         created = await gmail_post_json_for_user(
             user_id=user_id,
             url=f"{GMAIL_API_BASE}/labels",
             payload=payload,
         )
-    except Exception:
+        return created["id"]
+    except Exception as e:
+        if is_conflict_error(e):
+            return await find_label_after_conflict()
+        # Not a conflict — retry without color
         payload.pop("color", None)
-        created = await gmail_post_json_for_user(
-            user_id=user_id,
-            url=f"{GMAIL_API_BASE}/labels",
-            payload=payload,
-        )
-
-    return created["id"]
+        try:
+            created = await gmail_post_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/labels",
+                payload=payload,
+            )
+            return created["id"]
+        except Exception as e2:
+            if is_conflict_error(e2):
+                return await find_label_after_conflict()
+            raise
 
 
 async def delete_gmail_label_if_exists(user_id: str, label_name: str) -> dict[str, Any]:
