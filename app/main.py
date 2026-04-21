@@ -3874,6 +3874,118 @@ async def reactivate_subscription(user: dict[str, Any] = Depends(get_current_use
     }
 
 
+@app.get("/api/stats/overview")
+async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
+    """
+    Dashboard statistieken voor de ingelogde user.
+    Defensief: als een sub-query faalt, geeft dat veld 0/None i.p.v. 500.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    prev_month_start = (month_start - timedelta(days=1)).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    seven_days_ago = now - timedelta(days=7)
+
+    user_filter = f"user_id=eq.{quote(user_id, safe='')}"
+    month_iso = month_start.isoformat()
+    prev_month_start_iso = prev_month_start.isoformat()
+    prev_month_end_iso = month_start.isoformat()
+    seven_days_iso = seven_days_ago.isoformat()
+
+    async def count_rows(table: str, extra: str) -> int:
+        try:
+            data = await supabase_get(
+                f"/rest/v1/{table}?{user_filter}&{extra}&select=id"
+            )
+            return len(data) if isinstance(data, list) else 0
+        except Exception as exc:
+            print(f"[stats] count {table} failed: {repr(exc)}")
+            return 0
+
+    async def fetch_timestamps(table: str, extra: str) -> list[str]:
+        try:
+            data = await supabase_get(
+                f"/rest/v1/{table}?{user_filter}&{extra}&select=created_at"
+            )
+            if isinstance(data, list):
+                return [r.get("created_at") for r in data if r.get("created_at")]
+            return []
+        except Exception as exc:
+            print(f"[stats] fetch {table} failed: {repr(exc)}")
+            return []
+
+    # counts deze maand
+    emails_classified = await count_rows(
+        "emails", f"created_at=gte.{month_iso}"
+    )
+    drafts_ready = await count_rows(
+        "drafts",
+        f"created_at=gte.{month_iso}&status=neq.sent",
+    )
+    drafts_this_month = await count_rows(
+        "drafts", f"created_at=gte.{month_iso}"
+    )
+
+    # counts vorige maand (voor delta)
+    emails_prev = await count_rows(
+        "emails",
+        f"created_at=gte.{prev_month_start_iso}&created_at=lt.{prev_month_end_iso}",
+    )
+    drafts_prev = await count_rows(
+        "drafts",
+        f"created_at=gte.{prev_month_start_iso}&created_at=lt.{prev_month_end_iso}",
+    )
+
+    # time saved: 3 min per draft + 0.25 min per geclassificeerde mail
+    time_saved_minutes = round(drafts_this_month * 3 + emails_classified * 0.25)
+    time_saved_prev = round(drafts_prev * 3 + emails_prev * 0.25)
+
+    time_saved_delta_pct: int | None = None
+    if time_saved_prev > 0:
+        time_saved_delta_pct = round(
+            ((time_saved_minutes - time_saved_prev) / time_saved_prev) * 100
+        )
+
+    # weekly activity (laatste 7 dagen, Ma=0..Zo=6)
+    weekly_activity = [0] * 7
+    timestamps = await fetch_timestamps(
+        "emails", f"created_at=gte.{seven_days_iso}"
+    )
+    for ts in timestamps:
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+            weekday = dt.weekday()
+            if 0 <= weekday <= 6:
+                weekly_activity[weekday] += 1
+        except Exception:
+            continue
+
+    # statuslabels leven in Gmail, niet in Supabase -> null/0 zodat frontend "--" toont
+    priority_caught_pct: int | None = None
+    fast_reply_pct: int | None = None
+    followup_active = 0
+    waiting_reply = 0
+    spam_filtered = 0
+
+    return {
+        "time_saved_minutes": time_saved_minutes,
+        "time_saved_delta_pct": time_saved_delta_pct,
+        "drafts_ready": drafts_ready,
+        "emails_classified": emails_classified,
+        "priority_caught_pct": priority_caught_pct,
+        "fast_reply_pct": fast_reply_pct,
+        "spam_filtered": spam_filtered,
+        "followup_active": followup_active,
+        "waiting_reply": waiting_reply,
+        "weekly_activity": weekly_activity,
+    }
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
