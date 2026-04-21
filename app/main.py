@@ -2526,6 +2526,7 @@ Originele e-mail:
 
 async def process_open_to_respond_threads(
     user_id: str,
+    mailbox_id: str,
     mailbox_email: str | None,
     label_name_to_id: dict[str, str],
     max_results: int = 25,
@@ -2614,6 +2615,45 @@ async def process_open_to_respond_threads(
             target_label_name=target_label,
         )
 
+        # --- FOLLOW-UP RADAR: detect commitments in this just-sent mail ---
+        commitment_info = {"detected": False, "forced_follow_up": False}
+        try:
+            to_header = get_header_value(latest_user_headers, "To") or ""
+            recipient_email = None
+            recipient_name = None
+            if to_header:
+                import re as _re_cm
+                m = _re_cm.match(r'^\s*(?:"?([^"<]+?)"?\s*)?<?([^<>\s]+@[^<>\s]+)>?\s*$', to_header)
+                if m:
+                    recipient_name = (m.group(1) or "").strip() or None
+                    recipient_email = (m.group(2) or "").strip().lower() or None
+
+            sent_at_iso = None
+            try:
+                internal_ts = int(latest_user_message.get("internalDate", "0"))
+                if internal_ts:
+                    sent_at_iso = datetime.fromtimestamp(internal_ts / 1000, tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+
+            commitment_info = await process_sent_mail_for_commitment(
+                user_id=user_id,
+                mailbox_id=mailbox_id,
+                thread_id=thread_id,
+                message_id=message_id,
+                subject=latest_user_subject,
+                body_text=latest_user_body_text,
+                recipient_email=recipient_email,
+                recipient_name=recipient_name,
+                sent_at_iso=sent_at_iso,
+                label_name_to_id=label_name_to_id,
+                current_label_ids=set(updated_label_ids),
+            )
+            if commitment_info.get("forced_follow_up"):
+                target_label = "Follow Up"
+        except Exception as exc:
+            print(f"[commitment-hook] Failed for thread {thread_id}: {repr(exc)}")
+
         results.append(
             {
                 "gmail_message_id": message_id,
@@ -2624,6 +2664,7 @@ async def process_open_to_respond_threads(
                 "gmail_draft_id": None,
                 "label_ids": list(updated_label_ids),
                 "thread_status": "updated_after_sent_reply",
+                "commitment_detected": commitment_info.get("detected", False),
             }
         )
 
@@ -2846,6 +2887,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
     # 2) Alleen open To Respond threads opnieuw beoordelen als gebruiker echt gereageerd heeft
     updated_open_threads = await process_open_to_respond_threads(
         user_id=user["id"],
+        mailbox_id=mailbox["id"],
         mailbox_email=mailbox_email,
         label_name_to_id=label_name_to_id,
         max_results=max(max_results, 20),
@@ -3077,7 +3119,7 @@ async def google_callback(code: str):
     )
 
     return RedirectResponse(
-        url=f"https://officeflow-site-one.vercel.app/onboarding/preferences.html?email={quote(user_email)}",
+        url=f"https://officeflowcompany.com/onboarding/preferences.html?email={quote(user_email)}",
         status_code=302,
     )
 
@@ -3568,3 +3610,795 @@ async def stripe_webhook(request: Request):
     except Exception as exc:
         return JSONResponse(status_code=500, content={"error": f"Webhook handler failed: {str(exc)}"})
 
+# =========================================================================
+# OFFICEFLOW FEATURES: Morning Briefing + Follow-Up Radar + Relationship Intel
+# Append this entire file to the END of main.py
+# Then add ONE hook line in the sent-mail processing loop (see SECTION F)
+# =========================================================================
+
+import json as _json
+from datetime import datetime as _dt, timedelta as _td, date as _date, timezone as _tz
+from zoneinfo import ZoneInfo
+
+# ---------------------------------------------------------------------------
+# SECTION A — CONFIG
+# ---------------------------------------------------------------------------
+
+BRIEFING_DEFAULT_TIMEZONE = "Europe/Amsterdam"
+BRIEFING_ENABLED_GLOBAL = os.getenv("BRIEFING_ENABLED", "true").lower() == "true"
+COMMITMENT_DETECTION_ENABLED = os.getenv("COMMITMENT_DETECTION_ENABLED", "true").lower() == "true"
+
+
+# ---------------------------------------------------------------------------
+# SECTION B — FOLLOW-UP RADAR: commitment detection
+# ---------------------------------------------------------------------------
+
+async def detect_commitments_in_sent_mail(
+    subject: str | None,
+    body_text: str | None,
+    sent_at_iso: str | None = None,
+) -> dict[str, Any]:
+    """
+    Detects if a sent mail contains a commitment/promise (e.g. 'ik stuur morgen de offerte').
+    Returns: {"has_commitment": bool, "action_text": str|null, "due_date": "YYYY-MM-DD"|null, "reason": str}
+    """
+    if not COMMITMENT_DETECTION_ENABLED:
+        return {"has_commitment": False, "action_text": None, "due_date": None, "reason": "Detection disabled"}
+
+    if not body_text or len(body_text.strip()) < 10:
+        return {"has_commitment": False, "action_text": None, "due_date": None, "reason": "Body too short"}
+
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    try:
+        reference_date = _dt.fromisoformat(sent_at_iso.replace("Z", "+00:00")).date() if sent_at_iso else _date.today()
+    except Exception:
+        reference_date = _date.today()
+
+    prompt = f"""
+Je analyseert een e-mail die DE GEBRUIKER zojuist heeft verstuurd.
+Detecteer of de gebruiker een CONCRETE BELOFTE maakt die later actie van hem vereist.
+
+Voorbeelden van beloftes:
+- "Ik stuur je morgen de offerte"
+- "Volgende week kom ik erop terug"
+- "Vrijdag krijg je van mij de cijfers"
+- "Ik check het en laat het je uiterlijk donderdag weten"
+
+Geen beloftes (vragen / info / besluiten zonder toekomstige actie):
+- "Dank voor je bericht"
+- "Akkoord, we gaan door"
+- "Kun jij vrijdag laten weten?"  (vraag aan ANDER, niet eigen belofte)
+
+Referentiedatum (verstuurdatum): {reference_date.isoformat()}
+Gebruik deze datum om relatieve tijdsaanduidingen (morgen, volgende week, vrijdag, over 3 dagen) om te zetten naar een concrete due_date.
+Als er GEEN concrete deadline genoemd is maar wel een belofte, kies due_date = 7 dagen na referentiedatum.
+
+Geef alleen geldige JSON terug:
+{{
+  "has_commitment": true,
+  "action_text": "Offerte sturen",
+  "due_date": "2026-04-22",
+  "reason": "User zei 'ik stuur je morgen de offerte'"
+}}
+
+Of als er geen belofte is:
+{{
+  "has_commitment": false,
+  "action_text": null,
+  "due_date": null,
+  "reason": "Enkel een dankwoord, geen toekomstige actie"
+}}
+
+Onderwerp: {subject}
+
+E-mail:
+{body_text[:3000]}
+""".strip()
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.1,
+                },
+            )
+            response.raise_for_status()
+            content = response.json()["choices"][0]["message"]["content"]
+            result = _json.loads(content)
+
+            # Normalize
+            return {
+                "has_commitment": bool(result.get("has_commitment", False)),
+                "action_text": result.get("action_text"),
+                "due_date": result.get("due_date"),
+                "reason": result.get("reason", ""),
+            }
+    except Exception as exc:
+        print(f"[commitment-detection] Failed: {repr(exc)}")
+        return {"has_commitment": False, "action_text": None, "due_date": None, "reason": f"Error: {exc}"}
+
+
+async def supabase_upsert_commitment(
+    user_id: str,
+    mailbox_id: str,
+    gmail_thread_id: str,
+    gmail_message_id: str | None,
+    action_text: str,
+    due_date: str | None,
+    recipient_email: str | None,
+    recipient_name: str | None,
+    subject: str | None,
+) -> dict[str, Any] | None:
+    """Inserts or updates an active commitment for this thread."""
+    try:
+        # Check if an active commitment already exists for this thread
+        existing = await supabase_get(
+            f"/rest/v1/commitments?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active&select=*",
+        )
+        if existing and len(existing) > 0:
+            # Update existing
+            commitment_id = existing[0]["id"]
+            updated = await supabase_patch(
+                f"/rest/v1/commitments?id=eq.{commitment_id}",
+                {
+                    "action_text": action_text,
+                    "due_date": due_date,
+                    "recipient_email": recipient_email,
+                    "recipient_name": recipient_name,
+                    "subject": subject,
+                    "gmail_message_id": gmail_message_id,
+                    "updated_at": _dt.now(_tz.utc).isoformat(),
+                },
+                prefer="return=representation",
+            )
+            return updated[0] if isinstance(updated, list) and updated else existing[0]
+
+        # Insert new
+        inserted = await supabase_post(
+            "/rest/v1/commitments",
+            {
+                "user_id": user_id,
+                "mailbox_id": mailbox_id,
+                "gmail_thread_id": gmail_thread_id,
+                "gmail_message_id": gmail_message_id,
+                "action_text": action_text,
+                "due_date": due_date,
+                "recipient_email": recipient_email,
+                "recipient_name": recipient_name,
+                "subject": subject,
+                "status": "active",
+            },
+            prefer="return=representation",
+        )
+        return inserted[0] if isinstance(inserted, list) and inserted else None
+    except Exception as exc:
+        print(f"[commitment-upsert] Failed: {repr(exc)}")
+        return None
+
+
+async def supabase_complete_commitments_for_thread(gmail_thread_id: str) -> int:
+    """Marks active commitments for this thread as completed (used when a reply arrives)."""
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        await supabase_patch(
+            f"/rest/v1/commitments?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active",
+            {"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
+        )
+        return 1
+    except Exception as exc:
+        print(f"[commitment-complete] Failed: {repr(exc)}")
+        return 0
+
+
+async def process_sent_mail_for_commitment(
+    user_id: str,
+    mailbox_id: str,
+    thread_id: str | None,
+    message_id: str | None,
+    subject: str | None,
+    body_text: str | None,
+    recipient_email: str | None,
+    recipient_name: str | None,
+    sent_at_iso: str | None,
+    label_name_to_id: dict[str, str],
+    current_label_ids: set[str],
+) -> dict[str, Any]:
+    """
+    Wrapper: runs commitment detection on a sent mail. If detected, upserts DB record
+    AND forces Follow Up label on the thread.
+    Returns: {"detected": bool, "commitment": dict|null, "forced_follow_up": bool}
+    """
+    if not thread_id:
+        return {"detected": False, "commitment": None, "forced_follow_up": False}
+
+    detection = await detect_commitments_in_sent_mail(
+        subject=subject, body_text=body_text, sent_at_iso=sent_at_iso
+    )
+    if not detection.get("has_commitment"):
+        return {"detected": False, "commitment": None, "forced_follow_up": False}
+
+    saved = await supabase_upsert_commitment(
+        user_id=user_id,
+        mailbox_id=mailbox_id,
+        gmail_thread_id=thread_id,
+        gmail_message_id=message_id,
+        action_text=detection["action_text"] or "Opvolgen",
+        due_date=detection.get("due_date"),
+        recipient_email=recipient_email,
+        recipient_name=recipient_name,
+        subject=subject,
+    )
+
+    # Force Follow Up label (overrides any other status on thread)
+    forced = False
+    try:
+        if "Follow Up" in label_name_to_id:
+            await sync_thread_status(
+                user_id=user_id,
+                thread_id=thread_id,
+                current_message_id=message_id or "",
+                current_label_ids=current_label_ids,
+                label_name_to_id=label_name_to_id,
+                target_label_name="Follow Up",
+            )
+            forced = True
+    except Exception as exc:
+        print(f"[commitment-label] Force Follow Up failed: {repr(exc)}")
+
+    return {"detected": True, "commitment": saved, "forced_follow_up": forced}
+
+
+# ---------------------------------------------------------------------------
+# SECTION C — MORNING BRIEFING
+# ---------------------------------------------------------------------------
+
+async def get_mailbox_briefing_config(mailbox_id: str) -> dict[str, Any]:
+    try:
+        rows = await supabase_get(
+            f"/rest/v1/mailboxes?id=eq.{mailbox_id}&select=briefing_enabled,briefing_hour,briefing_minute,briefing_timezone,briefing_last_sent_at,email_address",
+        )
+        return rows[0] if rows else {}
+    except Exception:
+        return {}
+
+
+async def count_labels_for_briefing(
+    user_id: str, label_name_to_id: dict[str, str]
+) -> dict[str, int]:
+    """Counts threads in inbox per custom label. Returns dict {label_name: count}."""
+    counts: dict[str, int] = {}
+    for label_name in ("Priority", "To Respond", "Follow Up"):
+        label_id = label_name_to_id.get(label_name)
+        if not label_id:
+            counts[label_name] = 0
+            continue
+        try:
+            data = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/threads",
+                params={"labelIds": ["INBOX", label_id], "maxResults": 50},
+            )
+            counts[label_name] = data.get("resultSizeEstimate", len(data.get("threads", []) or []))
+        except Exception:
+            counts[label_name] = 0
+    return counts
+
+
+async def get_upcoming_commitments(user_id: str, days_ahead: int = 7) -> list[dict[str, Any]]:
+    try:
+        today = _date.today().isoformat()
+        cutoff = (_date.today() + _td(days=days_ahead)).isoformat()
+        rows = await supabase_get(
+            f"/rest/v1/commitments?user_id=eq.{user_id}&status=eq.active&due_date=lte.{cutoff}&order=due_date.asc&select=*",
+        )
+        return rows or []
+    except Exception as exc:
+        print(f"[briefing] commitments fetch failed: {repr(exc)}")
+        return []
+
+
+async def get_top_priority_threads(
+    user_id: str, label_name_to_id: dict[str, str], limit: int = 3
+) -> list[dict[str, Any]]:
+    """Returns top 3 threads from Priority > To Respond labels for the briefing."""
+    top: list[dict[str, Any]] = []
+    for label_name in ("Priority", "To Respond"):
+        if len(top) >= limit:
+            break
+        label_id = label_name_to_id.get(label_name)
+        if not label_id:
+            continue
+        try:
+            data = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/threads",
+                params={"labelIds": ["INBOX", label_id], "maxResults": limit},
+            )
+            for thread in data.get("threads", []) or []:
+                if len(top) >= limit:
+                    break
+                thread_id = thread.get("id")
+                snippet = thread.get("snippet", "")
+                # Fetch first message for subject/sender
+                try:
+                    thr = await gmail_get_json_for_user(
+                        user_id=user_id,
+                        url=f"{GMAIL_API_BASE}/threads/{thread_id}",
+                    )
+                    msgs = thr.get("messages", []) or []
+                    if not msgs:
+                        continue
+                    last_msg = msgs[-1]
+                    headers = last_msg.get("payload", {}).get("headers", [])
+                    subject = get_header_value(headers, "Subject") or "(geen onderwerp)"
+                    from_header = get_header_value(headers, "From") or ""
+                    top.append({
+                        "label": label_name,
+                        "subject": subject[:120],
+                        "from": from_header[:120],
+                        "snippet": snippet[:150],
+                        "thread_id": thread_id,
+                    })
+                except Exception:
+                    continue
+        except Exception:
+            continue
+    return top[:limit]
+
+
+def build_briefing_html(
+    user_first_name: str,
+    counts: dict[str, int],
+    commitments: list[dict[str, Any]],
+    top_threads: list[dict[str, Any]],
+    today_str: str,
+) -> tuple[str, str]:
+    """Returns (subject, html_body) for the briefing email."""
+    total_action = counts.get("Priority", 0) + counts.get("To Respond", 0) + counts.get("Follow Up", 0)
+    subject = f"OfficeFlow Briefing — {today_str} · {total_action} mails vragen aandacht"
+
+    commitment_rows = ""
+    if commitments:
+        for c in commitments[:10]:
+            due = c.get("due_date") or "geen deadline"
+            action = (c.get("action_text") or "Opvolgen")[:120]
+            recipient = c.get("recipient_name") or c.get("recipient_email") or "onbekend"
+            subj = (c.get("subject") or "")[:100]
+            commitment_rows += f"""
+            <tr>
+              <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#475569;white-space:nowrap;">{due}</td>
+              <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#0f172a;">
+                <div style="font-weight:600;">{action}</div>
+                <div style="color:#64748b;font-size:12px;margin-top:2px;">naar {recipient}{' — ' + subj if subj else ''}</div>
+              </td>
+            </tr>"""
+    else:
+        commitment_rows = '<tr><td colspan="2" style="padding:14px;color:#94a3b8;font-size:13px;text-align:center;">Geen openstaande beloftes — alles onder controle.</td></tr>'
+
+    thread_rows = ""
+    if top_threads:
+        for t in top_threads:
+            thread_rows += f"""
+            <tr>
+              <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;">
+                <div style="display:inline-block;padding:2px 8px;border-radius:6px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:700;letter-spacing:.3px;">{t.get('label','').upper()}</div>
+                <div style="font-weight:600;font-size:14px;color:#0f172a;margin-top:6px;">{t.get('subject','')}</div>
+                <div style="color:#64748b;font-size:12px;margin-top:2px;">{t.get('from','')}</div>
+                <div style="color:#475569;font-size:12px;margin-top:4px;line-height:1.4;">{t.get('snippet','')}</div>
+              </td>
+            </tr>"""
+    else:
+        thread_rows = '<tr><td style="padding:14px;color:#94a3b8;font-size:13px;text-align:center;">Geen urgente mails — mooi begin van je dag.</td></tr>'
+
+    html = f"""<!DOCTYPE html>
+<html>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:32px 12px;">
+    <tr><td align="center">
+      <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;background:#ffffff;border-radius:14px;overflow:hidden;box-shadow:0 2px 16px rgba(15,23,42,.04);">
+
+        <tr><td style="padding:28px 32px 20px 32px;border-bottom:1px solid #f1f5f9;">
+          <div style="font-size:12px;color:#f97316;font-weight:700;letter-spacing:1.5px;">OFFICEFLOW · BRIEFING</div>
+          <div style="font-size:22px;color:#0f172a;font-weight:700;margin-top:6px;">Goedemorgen{', ' + user_first_name if user_first_name else ''}.</div>
+          <div style="font-size:14px;color:#64748b;margin-top:4px;">{today_str}</div>
+        </td></tr>
+
+        <tr><td style="padding:24px 32px 8px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td width="33%" style="padding:0 6px 0 0;">
+                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px;text-align:center;">
+                  <div style="font-size:28px;font-weight:800;color:#b91c1c;">{counts.get('Priority',0)}</div>
+                  <div style="font-size:11px;color:#991b1b;font-weight:600;letter-spacing:.3px;margin-top:2px;">PRIORITY</div>
+                </div>
+              </td>
+              <td width="33%" style="padding:0 3px;">
+                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;text-align:center;">
+                  <div style="font-size:28px;font-weight:800;color:#1d4ed8;">{counts.get('To Respond',0)}</div>
+                  <div style="font-size:11px;color:#1e40af;font-weight:600;letter-spacing:.3px;margin-top:2px;">TO RESPOND</div>
+                </div>
+              </td>
+              <td width="33%" style="padding:0 0 0 6px;">
+                <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;text-align:center;">
+                  <div style="font-size:28px;font-weight:800;color:#c2410c;">{counts.get('Follow Up',0)}</div>
+                  <div style="font-size:11px;color:#9a3412;font-weight:600;letter-spacing:.3px;margin-top:2px;">FOLLOW UP</div>
+                </div>
+              </td>
+            </tr>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:24px 32px 8px 32px;">
+          <div style="font-size:13px;color:#0f172a;font-weight:700;letter-spacing:.3px;text-transform:uppercase;margin-bottom:12px;">Top 3 vandaag</div>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+            {thread_rows}
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:20px 32px 28px 32px;">
+          <div style="font-size:13px;color:#0f172a;font-weight:700;letter-spacing:.3px;text-transform:uppercase;margin-bottom:12px;">Jouw openstaande beloftes</div>
+          <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+            <thead><tr>
+              <th align="left" style="background:#f8fafc;padding:8px 14px;font-size:11px;color:#64748b;font-weight:700;letter-spacing:.3px;border-bottom:1px solid #e2e8f0;">DEADLINE</th>
+              <th align="left" style="background:#f8fafc;padding:8px 14px;font-size:11px;color:#64748b;font-weight:700;letter-spacing:.3px;border-bottom:1px solid #e2e8f0;">ACTIE</th>
+            </tr></thead>
+            <tbody>
+              {commitment_rows}
+            </tbody>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:16px 32px 24px 32px;background:#fafbfc;border-top:1px solid #f1f5f9;">
+          <div style="font-size:11px;color:#94a3b8;text-align:center;line-height:1.6;">
+            Deze briefing wordt elke ochtend door OfficeFlow voor je samengesteld.<br>
+            Geen auto-send. Geen auto-archive. Jij blijft altijd in controle.
+          </div>
+        </td></tr>
+
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>"""
+    return subject, html
+
+
+def build_briefing_raw_email(to_email: str, subject: str, html_body: str) -> str:
+    """Builds a base64url-encoded raw MIME email for Gmail API send."""
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    msg = MIMEMultipart("alternative")
+    msg["To"] = to_email
+    msg["From"] = to_email
+    msg["Subject"] = subject
+    plain = "Bekijk deze briefing in een HTML-capable client."
+    msg.attach(MIMEText(plain, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8").rstrip("=")
+    return raw
+
+
+async def send_briefing_for_mailbox(email: str) -> dict[str, Any]:
+    """Builds and sends the daily briefing to the given mailbox."""
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    mailbox = context["mailbox"]
+
+    label_map = await get_all_gmail_labels(user["id"])
+    label_name_to_id = {name: label["id"] for name, label in label_map.items()}
+
+    counts = await count_labels_for_briefing(user["id"], label_name_to_id)
+    commitments = await get_upcoming_commitments(user["id"], days_ahead=7)
+    top_threads = await get_top_priority_threads(user["id"], label_name_to_id, limit=3)
+
+    user_first_name = (user.get("full_name") or user.get("email") or "").split(" ")[0].split("@")[0]
+    today_str = _dt.now(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE)).strftime("%A %d %B %Y").capitalize()
+
+    subject, html_body = build_briefing_html(
+        user_first_name=user_first_name,
+        counts=counts,
+        commitments=commitments,
+        top_threads=top_threads,
+        today_str=today_str,
+    )
+
+    raw = build_briefing_raw_email(to_email=email, subject=subject, html_body=html_body)
+
+    send_response = await gmail_post_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/messages/send",
+        payload={"raw": raw},
+    )
+
+    # Update briefing_last_sent_at
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            {"briefing_last_sent_at": _dt.now(_tz.utc).isoformat()},
+        )
+    except Exception:
+        pass
+
+    return {
+        "status": "sent",
+        "email": email,
+        "subject": subject,
+        "gmail_message_id": send_response.get("id"),
+        "counts": counts,
+        "commitments_count": len(commitments),
+        "top_threads_count": len(top_threads),
+    }
+
+
+async def briefing_loop():
+    """Runs every 2 min. Sends briefing to each mailbox at its configured time (once per day)."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            if not BRIEFING_ENABLED_GLOBAL:
+                await asyncio.sleep(120)
+                continue
+
+            mailboxes = await get_all_active_mailboxes()
+            for mailbox in mailboxes:
+                try:
+                    email = mailbox.get("email_address")
+                    if not email:
+                        continue
+                    if not mailbox.get("briefing_enabled", True):
+                        continue
+
+                    tz_name = mailbox.get("briefing_timezone") or BRIEFING_DEFAULT_TIMEZONE
+                    hour = int(mailbox.get("briefing_hour") or 7)
+                    minute = int(mailbox.get("briefing_minute") or 30)
+
+                    try:
+                        now_local = _dt.now(ZoneInfo(tz_name))
+                    except Exception:
+                        now_local = _dt.now(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE))
+
+                    last_sent_raw = mailbox.get("briefing_last_sent_at")
+                    already_today = False
+                    if last_sent_raw:
+                        try:
+                            last_sent = _dt.fromisoformat(last_sent_raw.replace("Z", "+00:00"))
+                            if last_sent.astimezone(now_local.tzinfo).date() == now_local.date():
+                                already_today = True
+                        except Exception:
+                            pass
+
+                    if already_today:
+                        continue
+
+                    # Only send within a 5-min window after target time
+                    target = now_local.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                    if now_local < target:
+                        continue
+                    if (now_local - target) > _td(minutes=15):
+                        # Window missed for today; will send tomorrow
+                        continue
+
+                    print(f"[briefing] Sending to {email}...")
+                    result = await send_briefing_for_mailbox(email)
+                    print(f"[briefing] Sent to {email}: {result.get('gmail_message_id')}")
+                except Exception as exc:
+                    print(f"[briefing] Failed for {mailbox.get('email_address')}: {repr(exc)}")
+        except Exception as exc:
+            print(f"[briefing] Loop error: {repr(exc)}")
+
+        await asyncio.sleep(120)  # check every 2 min
+
+
+# ---------------------------------------------------------------------------
+# SECTION D — RELATIONSHIP INTELLIGENCE
+# ---------------------------------------------------------------------------
+
+async def get_relationship_for_contact(user_id: str, contact_email: str) -> dict[str, Any]:
+    """
+    Returns aggregated intel for a given contact email:
+    - total threads with this contact
+    - breakdown by label (Priority, To Respond, Waiting On Reply, Follow Up, Done)
+    - last contact date
+    - active commitments to this contact
+    """
+    contact_email = (contact_email or "").strip().lower()
+    if not contact_email:
+        raise HTTPException(status_code=400, detail="contact_email required")
+
+    # Query Gmail for threads involving this contact
+    query = f"(from:{contact_email} OR to:{contact_email})"
+    data = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/threads",
+        params={"q": query, "maxResults": 50},
+    )
+    thread_stubs = data.get("threads", []) or []
+
+    label_map = await get_all_gmail_labels(user_id)
+    id_to_name = {label["id"]: name for name, label in label_map.items()}
+    tracked_labels = {"Priority", "To Respond", "Waiting On Reply", "Follow Up", "Done", "FYI", "Notification", "Marketing", "Ignore"}
+
+    label_breakdown: dict[str, int] = {name: 0 for name in tracked_labels}
+    last_contact_ts: int | None = None
+    last_contact_subject: str | None = None
+    last_contact_direction: str | None = None  # "incoming" or "outgoing"
+    thread_summaries: list[dict[str, Any]] = []
+
+    for stub in thread_stubs[:30]:  # cap for performance
+        thread_id = stub.get("id")
+        if not thread_id:
+            continue
+        try:
+            thr = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/threads/{thread_id}",
+            )
+        except Exception:
+            continue
+
+        messages = thr.get("messages", []) or []
+        if not messages:
+            continue
+
+        last_msg = messages[-1]
+        internal_date = int(last_msg.get("internalDate", "0"))
+        last_msg_headers = last_msg.get("payload", {}).get("headers", [])
+        subject = get_header_value(last_msg_headers, "Subject") or "(geen onderwerp)"
+        from_header = get_header_value(last_msg_headers, "From") or ""
+        is_outgoing = contact_email not in from_header.lower()
+
+        # Aggregate labels from all messages in thread
+        thread_label_names: set[str] = set()
+        for m in messages:
+            for lid in m.get("labelIds", []) or []:
+                name = id_to_name.get(lid)
+                if name in tracked_labels:
+                    thread_label_names.add(name)
+
+        for name in thread_label_names:
+            label_breakdown[name] = label_breakdown.get(name, 0) + 1
+
+        if last_contact_ts is None or internal_date > last_contact_ts:
+            last_contact_ts = internal_date
+            last_contact_subject = subject
+            last_contact_direction = "outgoing" if is_outgoing else "incoming"
+
+        thread_summaries.append({
+            "thread_id": thread_id,
+            "subject": subject[:120],
+            "last_ts": internal_date,
+            "labels": sorted(thread_label_names),
+            "direction": "outgoing" if is_outgoing else "incoming",
+        })
+
+    thread_summaries.sort(key=lambda t: t["last_ts"], reverse=True)
+
+    # Commitments for this contact
+    try:
+        commitments = await supabase_get(
+            f"/rest/v1/commitments?user_id=eq.{user_id}&recipient_email=eq.{contact_email}&status=eq.active&order=due_date.asc&select=*",
+        )
+    except Exception:
+        commitments = []
+
+    last_contact_iso = None
+    if last_contact_ts:
+        try:
+            last_contact_iso = _dt.fromtimestamp(last_contact_ts / 1000, tz=_tz.utc).isoformat()
+        except Exception:
+            pass
+
+    return {
+        "contact_email": contact_email,
+        "total_threads": len(thread_stubs),
+        "shown_threads": len(thread_summaries),
+        "label_breakdown": label_breakdown,
+        "last_contact_at": last_contact_iso,
+        "last_contact_subject": last_contact_subject,
+        "last_contact_direction": last_contact_direction,
+        "active_commitments": commitments or [],
+        "recent_threads": thread_summaries[:15],
+    }
+
+
+# ---------------------------------------------------------------------------
+# SECTION E — ENDPOINTS
+# ---------------------------------------------------------------------------
+
+@app.post("/internal/send-briefing")
+async def http_send_briefing(email: str = Body(...)):
+    """Manual trigger: sends morning briefing immediately to the given mailbox."""
+    return await send_briefing_for_mailbox(email)
+
+
+@app.post("/internal/detect-commitment")
+async def http_detect_commitment(
+    email: str = Body(...),
+    subject: str | None = Body(default=None),
+    body_text: str = Body(...),
+):
+    """Manual trigger: runs commitment detection on arbitrary text (for testing)."""
+    return await detect_commitments_in_sent_mail(subject=subject, body_text=body_text)
+
+
+@app.get("/commitments")
+async def http_list_commitments(email: str, status: str = "active"):
+    """Lists commitments for a mailbox. Filter by status (active / completed / cancelled)."""
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    if status not in ("active", "completed", "cancelled"):
+        raise HTTPException(status_code=400, detail="status must be active / completed / cancelled")
+    rows = await supabase_get(
+        f"/rest/v1/commitments?user_id=eq.{user['id']}&status=eq.{status}&order=due_date.asc&select=*",
+    )
+    return {"commitments": rows or []}
+
+
+@app.post("/commitments/{commitment_id}/complete")
+async def http_complete_commitment(commitment_id: str, email: str = Body(...)):
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    now_iso = _dt.now(_tz.utc).isoformat()
+    updated = await supabase_patch(
+        f"/rest/v1/commitments?id=eq.{commitment_id}&user_id=eq.{user['id']}",
+        {"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
+        prefer="return=representation",
+    )
+    return {"status": "ok", "commitment": updated[0] if isinstance(updated, list) and updated else None}
+
+
+@app.get("/relationships/{contact_email}")
+async def http_relationship(contact_email: str, email: str):
+    """Relationship Intelligence: aggregated stats for a contact. `email` = user's mailbox."""
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    return await get_relationship_for_contact(user_id=user["id"], contact_email=contact_email)
+
+
+@app.post("/briefing/settings")
+async def http_briefing_settings(
+    email: str = Body(...),
+    enabled: bool | None = Body(default=None),
+    hour: int | None = Body(default=None),
+    minute: int | None = Body(default=None),
+    timezone_name: str | None = Body(default=None),
+):
+    """Update briefing preferences for a mailbox."""
+    context = await get_gmail_context_by_email(email)
+    mailbox = context["mailbox"]
+    patch: dict[str, Any] = {}
+    if enabled is not None:
+        patch["briefing_enabled"] = enabled
+    if hour is not None:
+        patch["briefing_hour"] = max(0, min(23, hour))
+    if minute is not None:
+        patch["briefing_minute"] = max(0, min(59, minute))
+    if timezone_name:
+        patch["briefing_timezone"] = timezone_name
+    if not patch:
+        return {"status": "noop"}
+    updated = await supabase_patch(
+        f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+        patch,
+        prefer="return=representation",
+    )
+    return {"status": "ok", "mailbox": updated[0] if isinstance(updated, list) and updated else None}
+
+
+# ---------------------------------------------------------------------------
+# SECTION F — STARTUP HOOK (add briefing loop to background tasks)
+# ---------------------------------------------------------------------------
+
+@app.on_event("startup")
+async def start_features_background_tasks():
+    print("Features background tasks started (briefing)")
+    asyncio.create_task(briefing_loop())
