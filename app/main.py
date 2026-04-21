@@ -3955,6 +3955,114 @@ async def get_top_priority_threads(
     return top[:limit]
 
 
+async def get_briefing_impact_stats(
+    user_id: str,
+    label_name_to_id: dict[str, str],
+) -> dict[str, int]:
+    """Computes 'what OfficeFlow did for you' stats for yesterday + this week.
+
+    Returns dict with:
+      - drafts_yesterday, mails_organized_yesterday, commitments_yesterday, minutes_saved_yesterday
+      - drafts_week, mails_organized_week, commitments_week, minutes_saved_week
+    """
+    stats = {
+        "drafts_yesterday": 0,
+        "mails_organized_yesterday": 0,
+        "commitments_yesterday": 0,
+        "minutes_saved_yesterday": 0,
+        "drafts_week": 0,
+        "mails_organized_week": 0,
+        "commitments_week": 0,
+        "minutes_saved_week": 0,
+    }
+
+    # Gmail: drafts created in last 24h
+    try:
+        data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads",
+            params={"q": "in:drafts newer_than:1d", "maxResults": 100},
+        )
+        stats["drafts_yesterday"] = int(data.get("resultSizeEstimate", len(data.get("threads", []) or [])))
+    except Exception:
+        pass
+
+    # Gmail: drafts created in last 7d
+    try:
+        data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads",
+            params={"q": "in:drafts newer_than:7d", "maxResults": 200},
+        )
+        stats["drafts_week"] = int(data.get("resultSizeEstimate", len(data.get("threads", []) or [])))
+    except Exception:
+        pass
+
+    # Gmail: mails organized (classified with one of our labels) in last 24h
+    classified_yesterday = 0
+    classified_week = 0
+    for ln in ("Priority", "To Respond", "Follow Up", "Done", "FYI", "Notification", "Marketing"):
+        lid = label_name_to_id.get(ln)
+        if not lid:
+            continue
+        try:
+            d1 = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/threads",
+                params={"labelIds": [lid], "q": "newer_than:1d", "maxResults": 100},
+            )
+            classified_yesterday += int(d1.get("resultSizeEstimate", 0))
+        except Exception:
+            pass
+        try:
+            d7 = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/threads",
+                params={"labelIds": [lid], "q": "newer_than:7d", "maxResults": 200},
+            )
+            classified_week += int(d7.get("resultSizeEstimate", 0))
+        except Exception:
+            pass
+    stats["mails_organized_yesterday"] = classified_yesterday
+    stats["mails_organized_week"] = classified_week
+
+    # Supabase: commitments caught in last 24h / last 7d
+    try:
+        yesterday_iso = (_dt.now(_tz.utc) - _td(days=1)).isoformat()
+        rows = await supabase_get(
+            f"/rest/v1/commitments?user_id=eq.{user_id}&created_at=gte.{yesterday_iso}&select=id",
+        )
+        stats["commitments_yesterday"] = len(rows or [])
+    except Exception:
+        pass
+
+    try:
+        week_iso = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
+        rows = await supabase_get(
+            f"/rest/v1/commitments?user_id=eq.{user_id}&created_at=gte.{week_iso}&select=id",
+        )
+        stats["commitments_week"] = len(rows or [])
+    except Exception:
+        pass
+
+    # Time saved estimates:
+    #   - AI draft ready to review: ~3 min saved per mail (don't have to compose from scratch)
+    #   - Classified / organized mail: ~0.5 min saved (less mental triage)
+    #   - Commitment caught: ~2 min saved (avoids forgetting + search time later)
+    stats["minutes_saved_yesterday"] = int(
+        stats["drafts_yesterday"] * 3
+        + stats["mails_organized_yesterday"] * 0.5
+        + stats["commitments_yesterday"] * 2
+    )
+    stats["minutes_saved_week"] = int(
+        stats["drafts_week"] * 3
+        + stats["mails_organized_week"] * 0.5
+        + stats["commitments_week"] * 2
+    )
+
+    return stats
+
+
 def build_briefing_html(
     user_first_name: str,
     counts: dict[str, int],
@@ -3962,15 +4070,24 @@ def build_briefing_html(
     top_threads: list[dict[str, Any]],
     today_str: str,
     user_email: str = "",
+    impact: dict[str, int] | None = None,
 ) -> tuple[str, str]:
     """Returns (subject, html_body) for the briefing email."""
     total_action = counts.get("Priority", 0) + counts.get("To Respond", 0) + counts.get("Follow Up", 0)
-    subject = f"OfficeFlow Briefing — {today_str} · {total_action} mails vragen aandacht"
+    impact = impact or {}
+    minutes_y = int(impact.get("minutes_saved_yesterday", 0) or 0)
 
-    # Gmail deep links — use authuser so correct account opens when multi-account
+    # Subject: highlight time saved if meaningful, else fallback to action count
+    if minutes_y >= 15:
+        subject = f"OfficeFlow — {minutes_y} min bespaard · {total_action} mails vragen aandacht"
+    else:
+        subject = f"OfficeFlow Briefing — {today_str} · {total_action} mails vragen aandacht"
+
+    # Gmail deep links — use /u/0/ path so URL matches existing Gmail tab
+    # (query strings like ?authuser=... force a fresh page load in a new tab;
+    # hash-only routes under /u/0/ navigate inside the already-open Gmail app).
     from urllib.parse import quote as _urlquote
-    au = f"?authuser={_urlquote(user_email)}" if user_email else "/u/0/"
-    gmail_base = f"https://mail.google.com/mail{au}"
+    gmail_base = "https://mail.google.com/mail/u/0/"
 
     def label_url(label_name: str) -> str:
         return f"{gmail_base}#label/{_urlquote(label_name.replace(' ', '+'), safe='+')}"
@@ -3998,7 +4115,7 @@ def build_briefing_html(
             <tr>
               <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#475569;white-space:nowrap;">{due}</td>
               <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#0f172a;">
-                <a href="{clink}" style="text-decoration:none;color:inherit;display:block;">
+                <a href="{clink}" target="_top" style="text-decoration:none;color:inherit;display:block;">
                   <div style="font-weight:600;color:#0f172a;">{action}</div>
                   <div style="color:#64748b;font-size:12px;margin-top:2px;">naar {recipient}{' — ' + subj if subj else ''}</div>
                 </a>
@@ -4015,7 +4132,7 @@ def build_briefing_html(
             thread_rows += f"""
             <tr>
               <td style="padding:0;border-bottom:1px solid #f1f5f9;">
-                <a href="{turl}" style="display:block;padding:10px 14px;text-decoration:none;color:inherit;">
+                <a href="{turl}" target="_top" style="display:block;padding:10px 14px;text-decoration:none;color:inherit;">
                   <div style="display:inline-block;padding:2px 8px;border-radius:6px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:700;letter-spacing:.3px;">{t.get('label','').upper()}</div>
                   <div style="font-weight:600;font-size:14px;color:#0f172a;margin-top:6px;">{t.get('subject','')}</div>
                   <div style="color:#64748b;font-size:12px;margin-top:2px;">{t.get('from','')}</div>
@@ -4025,6 +4142,44 @@ def build_briefing_html(
             </tr>"""
     else:
         thread_rows = '<tr><td style="padding:14px;color:#94a3b8;font-size:13px;text-align:center;">Geen urgente mails — mooi begin van je dag.</td></tr>'
+
+    # --- Derived impact values for the hero section ---
+    drafts_y = int(impact.get("drafts_yesterday", 0) or 0)
+    mails_y = int(impact.get("mails_organized_yesterday", 0) or 0)
+    commits_y = int(impact.get("commitments_yesterday", 0) or 0)
+    drafts_w = int(impact.get("drafts_week", 0) or 0)
+    commits_w = int(impact.get("commitments_week", 0) or 0)
+    minutes_w = int(impact.get("minutes_saved_week", 0) or 0)
+
+    # Human-friendly "time saved" string
+    def _fmt_minutes(m: int) -> str:
+        if m <= 0:
+            return "0 min"
+        if m < 60:
+            return f"{m} min"
+        hrs = m // 60
+        mins = m % 60
+        return f"{hrs}u {mins:02d}m" if mins else f"{hrs} uur"
+
+    time_saved_str = _fmt_minutes(minutes_y)
+
+    # Headline copy adapts to volume
+    if minutes_y >= 30:
+        hero_headline = f"OfficeFlow heeft {time_saved_str} voor je bespaard."
+        hero_sub = f"{drafts_y} drafts klaargezet · {mails_y} mails geordend · {commits_y} beloftes opgevangen."
+    elif drafts_y + commits_y + mails_y > 0:
+        hero_headline = "Rustige 24 uur — alles netjes verwerkt."
+        hero_sub = f"{drafts_y} drafts · {mails_y} mails geordend · {commits_y} beloftes opgevangen."
+    else:
+        hero_headline = "Je inbox is klaar voor vandaag."
+        hero_sub = "Geen nieuwe verwerkte mails in de afgelopen 24 uur."
+
+    # Week momentum copy
+    week_line = (
+        f"<strong style=\"color:#0f172a;\">{drafts_w}</strong> drafts · "
+        f"<strong style=\"color:#0f172a;\">{commits_w}</strong> beloftes · "
+        f"<strong style=\"color:#16a34a;\">{_fmt_minutes(minutes_w)} bespaard</strong>"
+    )
 
     html = f"""<!DOCTYPE html>
 <html>
@@ -4039,11 +4194,44 @@ def build_briefing_html(
           <div style="font-size:14px;color:#64748b;margin-top:4px;">{today_str}</div>
         </td></tr>
 
+        <tr><td style="padding:20px 32px 4px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="border-radius:12px;overflow:hidden;">
+            <tr><td style="padding:22px 24px;background:#0f172a;background-image:linear-gradient(135deg,#0f172a 0%,#1e293b 55%,#312e81 100%);color:#ffffff;">
+              <div style="font-size:11px;color:#fb923c;font-weight:700;letter-spacing:1.5px;">TERWIJL JIJ WEG WAS</div>
+              <div style="font-size:22px;font-weight:800;color:#ffffff;margin-top:6px;line-height:1.25;">{hero_headline}</div>
+              <div style="font-size:13px;color:#cbd5e1;margin-top:6px;line-height:1.5;">{hero_sub}</div>
+              <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;">
+                <tr>
+                  <td width="33%" style="padding:0 4px 0 0;">
+                    <div style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:12px;text-align:center;">
+                      <div style="font-size:22px;font-weight:800;color:#ffffff;line-height:1;">{drafts_y}</div>
+                      <div style="font-size:10px;color:#cbd5e1;font-weight:600;letter-spacing:.4px;margin-top:4px;">AI DRAFTS</div>
+                    </div>
+                  </td>
+                  <td width="33%" style="padding:0 2px;">
+                    <div style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:12px;text-align:center;">
+                      <div style="font-size:22px;font-weight:800;color:#ffffff;line-height:1;">{mails_y}</div>
+                      <div style="font-size:10px;color:#cbd5e1;font-weight:600;letter-spacing:.4px;margin-top:4px;">MAILS GEORDEND</div>
+                    </div>
+                  </td>
+                  <td width="33%" style="padding:0 0 0 4px;">
+                    <div style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.06);border-radius:8px;padding:12px;text-align:center;">
+                      <div style="font-size:22px;font-weight:800;color:#ffffff;line-height:1;">{commits_y}</div>
+                      <div style="font-size:10px;color:#cbd5e1;font-weight:600;letter-spacing:.4px;margin-top:4px;">BELOFTES</div>
+                    </div>
+                  </td>
+                </tr>
+              </table>
+            </td></tr>
+          </table>
+        </td></tr>
+
         <tr><td style="padding:24px 32px 8px 32px;">
+          <div style="font-size:13px;color:#0f172a;font-weight:700;letter-spacing:.3px;text-transform:uppercase;margin-bottom:12px;">Wat ligt er op je bord?</div>
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr>
               <td width="33%" style="padding:0 6px 0 0;">
-                <a href="{priority_url}" style="text-decoration:none;display:block;">
+                <a href="{priority_url}" target="_top" style="text-decoration:none;display:block;">
                   <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px;text-align:center;">
                     <div style="font-size:28px;font-weight:800;color:#b91c1c;">{counts.get('Priority',0)}</div>
                     <div style="font-size:11px;color:#991b1b;font-weight:600;letter-spacing:.3px;margin-top:2px;">PRIORITY</div>
@@ -4051,7 +4239,7 @@ def build_briefing_html(
                 </a>
               </td>
               <td width="33%" style="padding:0 3px;">
-                <a href="{to_respond_url}" style="text-decoration:none;display:block;">
+                <a href="{to_respond_url}" target="_top" style="text-decoration:none;display:block;">
                   <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;text-align:center;">
                     <div style="font-size:28px;font-weight:800;color:#1d4ed8;">{counts.get('To Respond',0)}</div>
                     <div style="font-size:11px;color:#1e40af;font-weight:600;letter-spacing:.3px;margin-top:2px;">TO RESPOND</div>
@@ -4059,7 +4247,7 @@ def build_briefing_html(
                 </a>
               </td>
               <td width="33%" style="padding:0 0 0 6px;">
-                <a href="{follow_up_url}" style="text-decoration:none;display:block;">
+                <a href="{follow_up_url}" target="_top" style="text-decoration:none;display:block;">
                   <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;text-align:center;">
                     <div style="font-size:28px;font-weight:800;color:#c2410c;">{counts.get('Follow Up',0)}</div>
                     <div style="font-size:11px;color:#9a3412;font-weight:600;letter-spacing:.3px;margin-top:2px;">FOLLOW UP</div>
@@ -4068,7 +4256,6 @@ def build_briefing_html(
               </td>
             </tr>
           </table>
-          <div style="font-size:11px;color:#94a3b8;text-align:center;margin-top:8px;">Klik op een kaart om dat label in Gmail te openen</div>
         </td></tr>
 
         <tr><td style="padding:24px 32px 8px 32px;">
@@ -4078,7 +4265,7 @@ def build_briefing_html(
           </table>
         </td></tr>
 
-        <tr><td style="padding:20px 32px 28px 32px;">
+        <tr><td style="padding:20px 32px 8px 32px;">
           <div style="font-size:13px;color:#0f172a;font-weight:700;letter-spacing:.3px;text-transform:uppercase;margin-bottom:12px;">Jouw openstaande beloftes</div>
           <table width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
             <thead><tr>
@@ -4088,6 +4275,17 @@ def build_briefing_html(
             <tbody>
               {commitment_rows}
             </tbody>
+          </table>
+        </td></tr>
+
+        <tr><td style="padding:12px 32px 24px 32px;">
+          <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border-radius:10px;border:1px solid #e2e8f0;">
+            <tr>
+              <td style="padding:14px 18px;">
+                <div style="font-size:11px;color:#64748b;font-weight:700;letter-spacing:.4px;text-transform:uppercase;">Deze week</div>
+                <div style="font-size:14px;color:#0f172a;margin-top:4px;line-height:1.5;">{week_line}</div>
+              </td>
+            </tr>
           </table>
         </td></tr>
 
@@ -4133,6 +4331,7 @@ async def send_briefing_for_mailbox(email: str) -> dict[str, Any]:
     counts = await count_labels_for_briefing(user["id"], label_name_to_id)
     commitments = await get_upcoming_commitments(user["id"], days_ahead=7)
     top_threads = await get_top_priority_threads(user["id"], label_name_to_id, limit=3)
+    impact = await get_briefing_impact_stats(user["id"], label_name_to_id)
 
     user_first_name = (user.get("full_name") or user.get("email") or "").split(" ")[0].split("@")[0]
     today_str = _dt.now(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE)).strftime("%A %d %B %Y").capitalize()
@@ -4144,6 +4343,7 @@ async def send_briefing_for_mailbox(email: str) -> dict[str, Any]:
         top_threads=top_threads,
         today_str=today_str,
         user_email=email,
+        impact=impact,
     )
 
     raw = build_briefing_raw_email(to_email=email, subject=subject, html_body=html_body)
