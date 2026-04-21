@@ -3961,10 +3961,29 @@ def build_briefing_html(
     commitments: list[dict[str, Any]],
     top_threads: list[dict[str, Any]],
     today_str: str,
+    user_email: str = "",
 ) -> tuple[str, str]:
     """Returns (subject, html_body) for the briefing email."""
     total_action = counts.get("Priority", 0) + counts.get("To Respond", 0) + counts.get("Follow Up", 0)
     subject = f"OfficeFlow Briefing — {today_str} · {total_action} mails vragen aandacht"
+
+    # Gmail deep links — use authuser so correct account opens when multi-account
+    from urllib.parse import quote as _urlquote
+    au = f"?authuser={_urlquote(user_email)}" if user_email else "/u/0/"
+    gmail_base = f"https://mail.google.com/mail{au}"
+
+    def label_url(label_name: str) -> str:
+        return f"{gmail_base}#label/{_urlquote(label_name.replace(' ', '+'), safe='+')}"
+
+    def thread_url(thread_id: str) -> str:
+        return f"{gmail_base}#inbox/{thread_id}"
+
+    def commitment_url(thread_id: str) -> str:
+        return f"{gmail_base}#label/Follow+Up/{thread_id}"
+
+    priority_url = label_url("Priority")
+    to_respond_url = label_url("To Respond")
+    follow_up_url = label_url("Follow Up")
 
     commitment_rows = ""
     if commitments:
@@ -3973,12 +3992,16 @@ def build_briefing_html(
             action = (c.get("action_text") or "Opvolgen")[:120]
             recipient = c.get("recipient_name") or c.get("recipient_email") or "onbekend"
             subj = (c.get("subject") or "")[:100]
+            cthread_id = c.get("gmail_thread_id") or ""
+            clink = commitment_url(cthread_id) if cthread_id else follow_up_url
             commitment_rows += f"""
             <tr>
               <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#475569;white-space:nowrap;">{due}</td>
               <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;font-size:13px;color:#0f172a;">
-                <div style="font-weight:600;">{action}</div>
-                <div style="color:#64748b;font-size:12px;margin-top:2px;">naar {recipient}{' — ' + subj if subj else ''}</div>
+                <a href="{clink}" style="text-decoration:none;color:inherit;display:block;">
+                  <div style="font-weight:600;color:#0f172a;">{action}</div>
+                  <div style="color:#64748b;font-size:12px;margin-top:2px;">naar {recipient}{' — ' + subj if subj else ''}</div>
+                </a>
               </td>
             </tr>"""
     else:
@@ -3987,13 +4010,17 @@ def build_briefing_html(
     thread_rows = ""
     if top_threads:
         for t in top_threads:
+            tid = t.get("thread_id") or ""
+            turl = thread_url(tid) if tid else label_url(t.get("label") or "Priority")
             thread_rows += f"""
             <tr>
-              <td style="padding:10px 14px;border-bottom:1px solid #f1f5f9;vertical-align:top;">
-                <div style="display:inline-block;padding:2px 8px;border-radius:6px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:700;letter-spacing:.3px;">{t.get('label','').upper()}</div>
-                <div style="font-weight:600;font-size:14px;color:#0f172a;margin-top:6px;">{t.get('subject','')}</div>
-                <div style="color:#64748b;font-size:12px;margin-top:2px;">{t.get('from','')}</div>
-                <div style="color:#475569;font-size:12px;margin-top:4px;line-height:1.4;">{t.get('snippet','')}</div>
+              <td style="padding:0;border-bottom:1px solid #f1f5f9;">
+                <a href="{turl}" style="display:block;padding:10px 14px;text-decoration:none;color:inherit;">
+                  <div style="display:inline-block;padding:2px 8px;border-radius:6px;background:#fef3c7;color:#92400e;font-size:11px;font-weight:700;letter-spacing:.3px;">{t.get('label','').upper()}</div>
+                  <div style="font-weight:600;font-size:14px;color:#0f172a;margin-top:6px;">{t.get('subject','')}</div>
+                  <div style="color:#64748b;font-size:12px;margin-top:2px;">{t.get('from','')}</div>
+                  <div style="color:#475569;font-size:12px;margin-top:4px;line-height:1.4;">{t.get('snippet','')}</div>
+                </a>
               </td>
             </tr>"""
     else:
@@ -4016,25 +4043,32 @@ def build_briefing_html(
           <table width="100%" cellpadding="0" cellspacing="0">
             <tr>
               <td width="33%" style="padding:0 6px 0 0;">
-                <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px;text-align:center;">
-                  <div style="font-size:28px;font-weight:800;color:#b91c1c;">{counts.get('Priority',0)}</div>
-                  <div style="font-size:11px;color:#991b1b;font-weight:600;letter-spacing:.3px;margin-top:2px;">PRIORITY</div>
-                </div>
+                <a href="{priority_url}" style="text-decoration:none;display:block;">
+                  <div style="background:#fef2f2;border:1px solid #fecaca;border-radius:10px;padding:14px;text-align:center;">
+                    <div style="font-size:28px;font-weight:800;color:#b91c1c;">{counts.get('Priority',0)}</div>
+                    <div style="font-size:11px;color:#991b1b;font-weight:600;letter-spacing:.3px;margin-top:2px;">PRIORITY</div>
+                  </div>
+                </a>
               </td>
               <td width="33%" style="padding:0 3px;">
-                <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;text-align:center;">
-                  <div style="font-size:28px;font-weight:800;color:#1d4ed8;">{counts.get('To Respond',0)}</div>
-                  <div style="font-size:11px;color:#1e40af;font-weight:600;letter-spacing:.3px;margin-top:2px;">TO RESPOND</div>
-                </div>
+                <a href="{to_respond_url}" style="text-decoration:none;display:block;">
+                  <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:14px;text-align:center;">
+                    <div style="font-size:28px;font-weight:800;color:#1d4ed8;">{counts.get('To Respond',0)}</div>
+                    <div style="font-size:11px;color:#1e40af;font-weight:600;letter-spacing:.3px;margin-top:2px;">TO RESPOND</div>
+                  </div>
+                </a>
               </td>
               <td width="33%" style="padding:0 0 0 6px;">
-                <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;text-align:center;">
-                  <div style="font-size:28px;font-weight:800;color:#c2410c;">{counts.get('Follow Up',0)}</div>
-                  <div style="font-size:11px;color:#9a3412;font-weight:600;letter-spacing:.3px;margin-top:2px;">FOLLOW UP</div>
-                </div>
+                <a href="{follow_up_url}" style="text-decoration:none;display:block;">
+                  <div style="background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;padding:14px;text-align:center;">
+                    <div style="font-size:28px;font-weight:800;color:#c2410c;">{counts.get('Follow Up',0)}</div>
+                    <div style="font-size:11px;color:#9a3412;font-weight:600;letter-spacing:.3px;margin-top:2px;">FOLLOW UP</div>
+                  </div>
+                </a>
               </td>
             </tr>
           </table>
+          <div style="font-size:11px;color:#94a3b8;text-align:center;margin-top:8px;">Klik op een kaart om dat label in Gmail te openen</div>
         </td></tr>
 
         <tr><td style="padding:24px 32px 8px 32px;">
@@ -4109,6 +4143,7 @@ async def send_briefing_for_mailbox(email: str) -> dict[str, Any]:
         commitments=commitments,
         top_threads=top_threads,
         today_str=today_str,
+        user_email=email,
     )
 
     raw = build_briefing_raw_email(to_email=email, subject=subject, html_body=html_body)
