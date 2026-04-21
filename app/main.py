@@ -4315,7 +4315,7 @@ async def get_relationship_for_contact(user_id: str, contact_email: str) -> dict
 # ---------------------------------------------------------------------------
 
 @app.post("/internal/send-briefing")
-async def http_send_briefing(email: str = Body(...)):
+async def http_send_briefing(email: str = Body(..., embed=True)):
     """Manual trigger: sends morning briefing immediately to the given mailbox."""
     return await send_briefing_for_mailbox(email)
 
@@ -4344,7 +4344,7 @@ async def http_list_commitments(email: str, status: str = "active"):
 
 
 @app.post("/commitments/{commitment_id}/complete")
-async def http_complete_commitment(commitment_id: str, email: str = Body(...)):
+async def http_complete_commitment(commitment_id: str, email: str = Body(..., embed=True)):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
     now_iso = _dt.now(_tz.utc).isoformat()
