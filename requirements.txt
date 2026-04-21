@@ -3,3 +3,4 @@ uvicorn
 python-dotenv
 httpx
 stripe
+pyjwt>=2.8.0

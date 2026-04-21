@@ -3,15 +3,16 @@ import json
 import asyncio
 import base64
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from email.mime.text import MIMEText
 from urllib.parse import quote
-from typing import Any
+from typing import Any, Optional
 
 import httpx
+import jwt
 import stripe
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request, Body
+from fastapi import FastAPI, HTTPException, Request, Body, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel
@@ -49,6 +50,13 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
+SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+# Redirect after first-time password setup via invite email
+SUPABASE_SET_PASSWORD_URL = os.getenv(
+    "SUPABASE_SET_PASSWORD_URL",
+    "https://officeflowcompany.com/set-password.html",
+)
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
@@ -222,6 +230,11 @@ class PromptSettingsPayload(BaseModel):
 
 class OnboardingCompletePayload(BaseModel):
     email: str
+
+
+class CancelSubscriptionPayload(BaseModel):
+    reason: Optional[str] = None
+    feedback: Optional[str] = None
 
 
 def require_env(value: str | None, name: str) -> str:
@@ -832,6 +845,95 @@ async def get_user_for_billing(email: str) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="No Stripe customer found")
 
     return user
+
+
+# ----------------------------
+# Supabase Auth helpers (JWT + invites)
+# ----------------------------
+
+async def get_current_user(
+    authorization: Optional[str] = Header(None),
+) -> dict[str, Any]:
+    """
+    FastAPI dependency — validates a Supabase Auth JWT sent as
+    `Authorization: Bearer <token>` and returns the matching row from
+    public.users. Raises 401 if the token is missing/invalid or 403 if
+    there is no corresponding user row.
+    """
+    if not authorization or not authorization.lower().startswith("bearer "):
+        raise HTTPException(status_code=401, detail="Missing bearer token")
+
+    token = authorization.split(" ", 1)[1].strip()
+    jwt_secret = require_env(SUPABASE_JWT_SECRET, "SUPABASE_JWT_SECRET")
+
+    try:
+        decoded = jwt.decode(
+            token,
+            jwt_secret,
+            algorithms=["HS256"],
+            audience="authenticated",
+            options={"verify_aud": True},
+        )
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.InvalidTokenError as exc:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+
+    email = (decoded.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=401, detail="Token missing email claim")
+
+    user = await supabase_get_user_by_email(email)
+    if not user:
+        raise HTTPException(status_code=403, detail="No user record found")
+
+    return user
+
+
+async def send_welcome_invite(email: str) -> bool:
+    """
+    Sends the Supabase Auth invite email so a user can set their first
+    password. Safe to call multiple times — if the auth user already exists
+    we log and return False instead of failing onboarding.
+    """
+    if not email:
+        return False
+
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    service_role_key = require_env(SUPABASE_SERVICE_ROLE_KEY, "SUPABASE_SERVICE_ROLE_KEY")
+
+    headers = {
+        "apikey": service_role_key,
+        "Authorization": f"Bearer {service_role_key}",
+        "Content-Type": "application/json",
+    }
+    body = {
+        "email": email,
+        "data": {"source": "officeflow_onboarding"},
+    }
+    # Supabase v2 auth endpoint — "redirect_to" is sent as a query string.
+    url = (
+        f"{supabase_url}/auth/v1/invite"
+        f"?redirect_to={quote(SUPABASE_SET_PASSWORD_URL, safe='')}"
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            response = await client.post(url, headers=headers, json=body)
+
+        if response.status_code in (200, 201):
+            print(f"[invite] Sent welcome invite to {email}")
+            return True
+
+        # 422 = user already exists → not fatal
+        print(
+            f"[invite] Supabase invite returned {response.status_code} "
+            f"for {email}: {response.text[:200]}"
+        )
+        return False
+    except Exception as exc:
+        print(f"[invite] Failed to send invite to {email}: {repr(exc)}")
+        return False
 
 
 # ----------------------------
@@ -3376,6 +3478,21 @@ async def onboarding_complete(payload: OnboardingCompletePayload):
         status="connected",
     )
 
+    # Send Supabase Auth invite email so the user can set a password and
+    # log in at /login.html. Best-effort: failure here must not block
+    # onboarding, because Gmail is already connected successfully.
+    try:
+        invite_already_sent = bool(user.get("invite_sent_at"))
+        if not invite_already_sent:
+            invited = await send_welcome_invite(payload.email)
+            if invited:
+                await supabase_patch(
+                    f"/rest/v1/users?id=eq.{quote(user['id'], safe='')}",
+                    {"invite_sent_at": utc_now_iso()},
+                )
+    except Exception as exc:
+        print(f"[onboarding] Invite send skipped: {repr(exc)}")
+
     onboarding_state = await supabase_get_onboarding_state(user["id"])
     existing_first_draft_generated = False
     if onboarding_state:
@@ -3488,6 +3605,158 @@ async def train_style_profile(
     }
 
 
+# ---------------------------------------------------------------------------
+# Subscription management (dashboard)
+# ---------------------------------------------------------------------------
+
+def _stripe_sub_period_end_iso(subscription: Any) -> Optional[str]:
+    try:
+        period_end = subscription.get("current_period_end")
+        if period_end:
+            return datetime.fromtimestamp(int(period_end), tz=timezone.utc).isoformat()
+    except Exception:
+        return None
+    return None
+
+
+def _stripe_sub_price_amount(subscription: Any) -> Optional[str]:
+    try:
+        items = subscription.get("items", {}).get("data", [])
+        if not items:
+            return None
+        price = items[0].get("price") or {}
+        unit_amount = price.get("unit_amount")
+        currency = (price.get("currency") or "eur").upper()
+        if unit_amount is None:
+            return None
+        return f"{currency} {unit_amount / 100:.2f}"
+    except Exception:
+        return None
+
+
+@app.get("/api/subscription/status")
+async def get_subscription_status(user: dict[str, Any] = Depends(get_current_user)):
+    stripe_customer_id = user.get("stripe_customer_id")
+    stripe_subscription_id = user.get("stripe_subscription_id")
+
+    payload: dict[str, Any] = {
+        "subscription_status": user.get("subscription_status"),
+        "access_allowed": user.get("access_allowed"),
+        "cancel_at_period_end": False,
+        "current_period_end": None,
+        "plan_price": user.get("plan_price"),
+        "plan_name": user.get("plan_name"),
+        "cancels_at": user.get("cancels_at"),
+        "cancelled_at": user.get("cancelled_at"),
+        "deletion_scheduled_at": user.get("deletion_scheduled_at"),
+    }
+
+    if not STRIPE_SECRET_KEY or not stripe_subscription_id:
+        return payload
+
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY
+        sub = stripe.Subscription.retrieve(stripe_subscription_id)
+        sub_dict = sub if isinstance(sub, dict) else sub.to_dict()
+        payload["cancel_at_period_end"] = bool(sub_dict.get("cancel_at_period_end"))
+        payload["current_period_end"] = _stripe_sub_period_end_iso(sub_dict)
+        price_label = _stripe_sub_price_amount(sub_dict)
+        if price_label and not payload["plan_price"]:
+            payload["plan_price"] = price_label
+    except Exception as exc:
+        print(f"[subscription/status] Stripe lookup failed: {repr(exc)}")
+
+    return payload
+
+
+@app.post("/api/subscription/cancel")
+async def cancel_subscription(
+    body: CancelSubscriptionPayload,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    stripe_subscription_id = user.get("stripe_subscription_id")
+    if not stripe_subscription_id:
+        raise HTTPException(status_code=400, detail="Geen actief abonnement gevonden.")
+
+    require_env(STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY")
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    try:
+        sub = stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=True,
+        )
+        sub_dict = sub if isinstance(sub, dict) else sub.to_dict()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Stripe cancel failed: {exc}")
+
+    period_end_iso = _stripe_sub_period_end_iso(sub_dict)
+
+    patch_payload: dict[str, Any] = {
+        "subscription_status": "canceling",
+        "access_allowed": True,
+        "cancels_at": period_end_iso,
+        "cancel_reason": body.reason,
+        "cancel_feedback": body.feedback,
+    }
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/users?id=eq.{quote(user['id'], safe='')}",
+            patch_payload,
+        )
+    except Exception as exc:
+        # Don't fail the cancel on Supabase write errors; Stripe is source of truth
+        print(f"[subscription/cancel] Supabase update warning: {repr(exc)}")
+
+    return {
+        "status": "ok",
+        "cancel_at_period_end": True,
+        "current_period_end": period_end_iso,
+    }
+
+
+@app.post("/api/subscription/reactivate")
+async def reactivate_subscription(user: dict[str, Any] = Depends(get_current_user)):
+    stripe_subscription_id = user.get("stripe_subscription_id")
+    if not stripe_subscription_id:
+        raise HTTPException(status_code=400, detail="Geen abonnement gevonden.")
+
+    require_env(STRIPE_SECRET_KEY, "STRIPE_SECRET_KEY")
+    stripe.api_key = STRIPE_SECRET_KEY
+
+    try:
+        sub = stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=False,
+        )
+        sub_dict = sub if isinstance(sub, dict) else sub.to_dict()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Stripe reactivate failed: {exc}")
+
+    period_end_iso = _stripe_sub_period_end_iso(sub_dict)
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/users?id=eq.{quote(user['id'], safe='')}",
+            {
+                "subscription_status": "active",
+                "access_allowed": True,
+                "cancels_at": None,
+                "cancel_reason": None,
+                "cancel_feedback": None,
+            },
+        )
+    except Exception as exc:
+        print(f"[subscription/reactivate] Supabase update warning: {repr(exc)}")
+
+    return {
+        "status": "ok",
+        "cancel_at_period_end": False,
+        "current_period_end": period_end_iso,
+    }
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
@@ -3590,6 +3859,20 @@ async def stripe_webhook(request: Request):
                         stripe_customer_id=customer_id,
                         stripe_subscription_id=subscription_id,
                     )
+
+                    # Schedule 30-day data deletion (matches privacy policy)
+                    now_utc = datetime.now(timezone.utc)
+                    deletion_at = now_utc + timedelta(days=30)
+                    try:
+                        await supabase_patch(
+                            f"/rest/v1/users?id=eq.{quote(user['id'], safe='')}",
+                            {
+                                "cancelled_at": now_utc.isoformat(),
+                                "deletion_scheduled_at": deletion_at.isoformat(),
+                            },
+                        )
+                    except Exception as exc:
+                        print(f"[stripe-webhook] deletion schedule write failed: {repr(exc)}")
 
                     mailbox = await supabase_get_mailbox_by_user_id(
                         user_id=user["id"],
