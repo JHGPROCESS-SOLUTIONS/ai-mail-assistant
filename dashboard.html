@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dashboard – OfficeFlow</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --orange: #F97316;
+      --orange-2: #EA580C;
+      --blue: #4F46E5;
+      --navy: #08142f;
+      --text: #0F172A;
+      --text-2: #64748B;
+      --text-3: #94A3B8;
+      --border: #E2E8F0;
+      --bg: #F8FAFC;
+      --warm: #fdfaf5;
+      --green: #16a34a;
+      --red: #dc2626;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: linear-gradient(180deg, var(--warm) 0%, #fef8ef 100%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+
+    /* NAV */
+    nav {
+      background: #fff;
+      border-bottom: 1px solid var(--border);
+      padding: 14px 0;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    .nav-inner {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 0 24px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .logo { font-size: 18px; font-weight: 700; color: var(--navy); text-decoration: none; }
+    .logo .flow {
+      background: linear-gradient(90deg, #F97316, #FB923C);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .nav-user {
+      display: flex; align-items: center; gap: 12px;
+      font-size: 14px; color: var(--text-2);
+    }
+    .btn-ghost {
+      background: transparent; border: 1.5px solid var(--border); color: var(--text-2);
+      padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
+      cursor: pointer; font-family: inherit; transition: all .2s;
+    }
+    .btn-ghost:hover { border-color: var(--orange); color: var(--orange); }
+
+    /* CONTENT */
+    .wrap { max-width: 900px; margin: 0 auto; padding: 48px 24px 80px; }
+    .eyebrow {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 12px; font-weight: 600; color: var(--orange);
+      background: #fff4e6; padding: 5px 12px; border-radius: 20px;
+      letter-spacing: .02em;
+    }
+    h1 { font-size: 32px; margin: 12px 0 6px; letter-spacing: -.01em; }
+    .page-desc { color: var(--text-2); font-size: 16px; margin-bottom: 40px; }
+
+    .section-title { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 32px 0 14px; font-weight: 700; }
+
+    .card {
+      background: #fff;
+      border: 1.5px solid var(--border);
+      border-radius: 16px;
+      padding: 28px;
+      margin-bottom: 16px;
+    }
+    .card-row {
+      display: flex; justify-content: space-between; align-items: center;
+      gap: 20px; flex-wrap: wrap;
+    }
+    .card-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 700; }
+    .card-title { font-size: 19px; font-weight: 700; margin-top: 4px; }
+    .card-meta { font-size: 13px; color: var(--text-2); margin-top: 8px; line-height: 1.55; }
+    .card-meta strong.cancel-warn { color: var(--red); }
+
+    .status-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--green); margin-right: 8px;
+    }
+    .status-dot.warn { background: var(--orange); }
+    .status-dot.error { background: var(--red); }
+
+    .btn-danger {
+      background: transparent;
+      border: 1.5px solid var(--border);
+      color: var(--text-2);
+      padding: 10px 18px;
+      border-radius: 10px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      font-family: inherit;
+      transition: all .2s;
+    }
+    .btn-danger:hover { border-color: #fca5a5; color: var(--red); background: #fef2f2; }
+
+    .btn-orange {
+      background: var(--orange); color: #fff; border: none;
+      padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    .btn-orange:hover { background: var(--orange-2); }
+
+    .link-row {
+      display: flex; justify-content: space-between; align-items: center;
+      padding: 14px 0; border-bottom: 1px solid var(--border);
+      font-size: 14px;
+    }
+    .link-row:last-child { border-bottom: none; }
+    .link-row a { color: var(--orange); text-decoration: none; font-weight: 500; }
+    .link-row a:hover { text-decoration: underline; }
+
+    .gmail-only-notice {
+      margin-top: 16px;
+      padding: 14px 16px;
+      border-radius: 12px;
+      background: #FFFBEB;
+      border: 1px solid #FDE68A;
+      display: flex; gap: 12px; align-items: flex-start;
+      font-size: 13px; line-height: 1.6; color: #78350F;
+    }
+    .gmail-only-notice strong { color: #422006; }
+    .gmail-only-notice a { color: #B45309; font-weight: 600; text-decoration: underline; }
+    .gmail-only-icon {
+      flex: 0 0 20px; width: 20px; height: 20px; border-radius: 999px;
+      background: #F59E0B; color: #fff; font-size: 12px; font-weight: 800;
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-top: 1px;
+    }
+
+    /* MODAL */
+    [hidden] { display: none !important; }
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(15,23,42,.55);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 1000; padding: 20px;
+    }
+    .modal {
+      background: #fff; border-radius: 16px; padding: 32px;
+      max-width: 460px; width: 100%;
+      box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    }
+    .modal h3 { margin: 0 0 10px; font-size: 22px; }
+    .modal-desc { font-size: 14px; color: var(--text-2); line-height: 1.6; margin-bottom: 20px; }
+    .modal-label { display: block; font-size: 13px; font-weight: 600; margin: 14px 0 6px; }
+    .modal-label .optional { font-weight: 400; color: var(--text-3); }
+    .modal-input {
+      width: 100%; padding: 10px 12px;
+      border: 1.5px solid var(--border); border-radius: 10px;
+      font-size: 14px; font-family: inherit;
+    }
+    .modal-input:focus { outline: none; border-color: var(--orange); }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+    .modal-icon-ok {
+      width: 48px; height: 48px; border-radius: 50%;
+      background: #dcfce7; color: var(--green);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 24px; font-weight: 700; margin: 0 auto 16px;
+    }
+    .btn-danger-solid {
+      background: var(--red); color: #fff; border: none;
+      padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+    }
+    .btn-danger-solid:hover { background: #b91c1c; }
+    .btn-danger-solid:disabled { opacity: .6; }
+
+    .loading { text-align: center; padding: 80px 20px; color: var(--text-2); }
+    @media (max-width: 600px) {
+      h1 { font-size: 26px; }
+      .card { padding: 22px; }
+    }
+  </style>
+</head>
+<body>
+
+  <nav>
+    <div class="nav-inner">
+      <a href="/" class="logo">Office<span class="flow">Flow</span></a>
+      <div class="nav-user">
+        <span id="user-email">—</span>
+        <button class="btn-ghost" id="logout-btn">Uitloggen</button>
+      </div>
+    </div>
+  </nav>
+
+  <div class="wrap" id="page-content" style="display:none;">
+    <div class="eyebrow">Dashboard</div>
+    <h1>Welkom terug</h1>
+    <p class="page-desc">Beheer je abonnement, koppelingen en voorkeuren.</p>
+
+    <!-- Subscription card -->
+    <div class="section-title">Abonnement</div>
+    <div class="card">
+      <div class="card-row">
+        <div>
+          <div class="card-label">Actief plan</div>
+          <div class="card-title" id="plan-title">Mailbox Manager</div>
+          <div class="card-meta" id="plan-meta">Laden…</div>
+        </div>
+        <button class="btn-danger" id="cancel-btn">Opzeggen</button>
+      </div>
+    </div>
+
+    <!-- Gmail connection -->
+    <div class="section-title">Gmail-koppeling</div>
+    <div class="card">
+      <div class="card-row">
+        <div>
+          <div class="card-label">Status</div>
+          <div class="card-title" id="gmail-status">
+            <span class="status-dot"></span>Verbonden
+          </div>
+          <div class="card-meta" id="gmail-email">—</div>
+        </div>
+        <a class="btn-ghost" href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Beheer bij Google</a>
+      </div>
+      <div class="gmail-only-notice" role="note">
+        <span class="gmail-only-icon" aria-hidden="true">!</span>
+        <div>
+          <strong>Werk in Gmail, niet in Apple Mail of Outlook.</strong>
+          AI-concepten verschijnen in de Gmail-thread met een verzendknop. In andere e-mailclients (Apple Mail, Outlook, Thunderbird) tonen labels geen kleuren en kun je concepten niet vanuit de thread versturen. Open <a href="https://mail.google.com" target="_blank" rel="noopener">mail.google.com</a> of gebruik de officiële Gmail-app op je telefoon.
+        </div>
+      </div>
+    </div>
+
+    <!-- Account -->
+    <div class="section-title">Account</div>
+    <div class="card">
+      <div class="link-row">
+        <span>Wachtwoord wijzigen</span>
+        <a href="/reset-password.html">Wijzig →</a>
+      </div>
+      <div class="link-row">
+        <span>Privacybeleid</span>
+        <a href="/privacy.html">Bekijk →</a>
+      </div>
+      <div class="link-row">
+        <span>Algemene voorwaarden</span>
+        <a href="/terms.html">Bekijk →</a>
+      </div>
+      <div class="link-row">
+        <span>Support</span>
+        <a href="mailto:mail@officeflowcompany.com">mail@officeflowcompany.com</a>
+      </div>
+    </div>
+  </div>
+
+  <div class="loading" id="loading">Laden…</div>
+
+  <!-- CANCEL MODAL -->
+  <div class="modal-overlay" id="cancel-modal" hidden>
+    <div class="modal">
+      <h3>Abonnement opzeggen</h3>
+      <p class="modal-desc">Je behoudt toegang tot het einde van de lopende maand. Daarna stopt het abonnement automatisch en wordt je data binnen 30 dagen verwijderd, zoals in ons <a href="/privacy.html" style="color:var(--orange);">privacybeleid</a> beschreven.</p>
+
+      <label class="modal-label">Waarom zeg je op? <span class="optional">(optioneel)</span></label>
+      <select id="cancel-reason" class="modal-input">
+        <option value="">— Kies een reden —</option>
+        <option value="too_expensive">Te duur</option>
+        <option value="not_using">Ik gebruik het niet genoeg</option>
+        <option value="missing_feature">Mist een functie</option>
+        <option value="switched">Overgestapt naar iets anders</option>
+        <option value="temporary">Tijdelijk — ik kom terug</option>
+        <option value="other">Anders</option>
+      </select>
+
+      <label class="modal-label">Feedback <span class="optional">(optioneel)</span></label>
+      <textarea id="cancel-feedback" class="modal-input" rows="3" placeholder="Iets dat we moeten weten?"></textarea>
+
+      <div class="modal-actions">
+        <button class="btn-ghost" id="cancel-close">Toch niet</button>
+        <button class="btn-danger-solid" id="confirm-cancel">Definitief opzeggen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- SUCCESS MODAL -->
+  <div class="modal-overlay" id="cancel-success" hidden>
+    <div class="modal">
+      <div class="modal-icon-ok">✓</div>
+      <h3>Abonnement opgezegd</h3>
+      <p class="modal-desc">Je behoudt toegang tot <strong id="end-date">–</strong>. Bedenk je je? Je kunt tot die datum kosteloos reactiveren.</p>
+      <div class="modal-actions">
+        <button class="btn-ghost" id="reactivate-btn">Toch doorgaan</button>
+        <button class="btn-orange" id="success-close">Sluiten</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script>
+    const SUPABASE_URL = 'https://lvjdqpklkueajxzznaqq.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx2amRxcGtsa3VlYWp4enpuYXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxODc5MTMsImV4cCI6MjA4OTc2MzkxM30.vnUBZpET7spcQ0oIhSwSFeZZdw1F2WYcYul2lbyotsk';
+    const API_BASE = 'https://api.officeflowcompany.com'; // jouw FastAPI backend
+    const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+    // Auth guard + load data
+    (async () => {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) {
+        window.location.href = '/login.html';
+        return;
+      }
+
+      document.getElementById('user-email').textContent = session.user.email;
+      document.getElementById('gmail-email').textContent = session.user.email;
+
+      // Haal subscription-status op via backend
+      const res = await fetch(API_BASE + '/api/subscription/status', {
+        headers: { 'Authorization': 'Bearer ' + session.access_token }
+      });
+      const data = await res.json();
+
+      const planMeta = document.getElementById('plan-meta');
+      if (data.cancels_at) {
+        const dt = new Date(data.cancels_at).toLocaleDateString('nl-NL');
+        planMeta.innerHTML = `<strong class="cancel-warn">Abonnement stopt op ${dt}</strong>`;
+        document.getElementById('cancel-btn').textContent = 'Toch doorgaan';
+        document.getElementById('cancel-btn').onclick = reactivate;
+      } else {
+        const next = data.next_billing_date
+          ? ' · Volgende betaling op ' + new Date(data.next_billing_date).toLocaleDateString('nl-NL')
+          : '';
+        planMeta.textContent = `${data.price || '€24'}/mnd · Maandelijks opzegbaar${next}`;
+      }
+
+      document.getElementById('plan-title').textContent = data.plan || 'Mailbox Manager';
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('page-content').style.display = 'block';
+    })();
+
+    // Logout
+    document.getElementById('logout-btn').addEventListener('click', async () => {
+      await sb.auth.signOut();
+      window.location.href = '/login.html';
+    });
+
+    // Cancel modal open
+    document.getElementById('cancel-btn').addEventListener('click', () => {
+      document.getElementById('cancel-modal').hidden = false;
+    });
+    document.getElementById('cancel-close').addEventListener('click', () => {
+      document.getElementById('cancel-modal').hidden = true;
+    });
+    document.getElementById('success-close').addEventListener('click', () => location.reload());
+
+    // Confirm cancel
+    document.getElementById('confirm-cancel').addEventListener('click', async () => {
+      const btn = document.getElementById('confirm-cancel');
+      btn.disabled = true;
+      btn.textContent = 'Bezig…';
+
+      const { data: { session } } = await sb.auth.getSession();
+      const res = await fetch(API_BASE + '/api/subscription/cancel', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + session.access_token
+        },
+        body: JSON.stringify({
+          reason: document.getElementById('cancel-reason').value,
+          feedback: document.getElementById('cancel-feedback').value,
+        })
+      });
+
+      const data = await res.json();
+      document.getElementById('cancel-modal').hidden = true;
+      document.getElementById('end-date').textContent =
+        new Date(data.cancels_at * 1000).toLocaleDateString('nl-NL');
+      document.getElementById('cancel-success').hidden = false;
+    });
+
+    document.getElementById('reactivate-btn').addEventListener('click', reactivate);
+
+    async function reactivate() {
+      const { data: { session } } = await sb.auth.getSession();
+      await fetch(API_BASE + '/api/subscription/reactivate', {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + session.access_token }
+      });
+      location.reload();
+    }
+  </script>
+</body>
+</html>

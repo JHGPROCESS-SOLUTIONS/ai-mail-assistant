@@ -1,0 +1,480 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OfficeFlow — Setup voltooid</title>
+
+  <style>
+    :root {
+      --bg-main: #FFFFFF;
+      --bg-subtle: #F8FAFC;
+      --bg-gradient: linear-gradient(180deg, #FFFFFF 0%, #FFF7ED 100%);
+      --text-primary: #0F172A;
+      --text-secondary: #64748B;
+      --primary-orange: #F97316;
+      --primary-orange-hover: #EA580C;
+      --light-accent: #FED7AA;
+      --gradient-primary: linear-gradient(135deg, #F97316 0%, #FB923C 100%);
+      --border-light: #E2E8F0;
+      --success: #22C55E;
+      --shadow-soft: 0 18px 60px rgba(15, 23, 42, 0.08);
+      --shadow-button: 0 12px 28px rgba(249, 115, 22, 0.24);
+      --radius-card: 28px;
+      --radius-button: 16px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      min-height: 100%;
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      background: var(--bg-gradient);
+      color: var(--text-primary);
+    }
+
+    body {
+      min-height: 100vh;
+    }
+
+    .page {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .wrapper {
+      width: 100%;
+      max-width: 900px;
+    }
+
+    .top-pill-wrap {
+      display: flex;
+      justify-content: center;
+      margin-bottom: 22px;
+    }
+
+    .top-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 9px 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.8);
+      border: 1px solid var(--border-light);
+      color: var(--text-secondary);
+      font-size: 13px;
+      font-weight: 600;
+    }
+
+    .top-pill-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--primary-orange);
+      display: inline-block;
+    }
+
+    .card {
+      background: var(--bg-main);
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-card);
+      box-shadow: var(--shadow-soft);
+      overflow: hidden;
+    }
+
+    .hero {
+      padding: 42px 38px 30px;
+      text-align: center;
+      background:
+        radial-gradient(circle at top right, rgba(249, 115, 22, 0.08), transparent 28%),
+        linear-gradient(180deg, #FFFFFF 0%, #FFFDFB 100%);
+      border-bottom: 1px solid var(--border-light);
+    }
+
+    .logo {
+      width: 190px;
+      max-width: 72%;
+      height: auto;
+      display: block;
+      margin: 0 auto 18px;
+    }
+
+    .success-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 18px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(34, 197, 94, 0.10);
+      border: 1px solid rgba(34, 197, 94, 0.18);
+      color: #166534;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .success-badge-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 999px;
+      background: var(--success);
+      display: inline-block;
+    }
+
+    h1 {
+      margin: 0 0 12px;
+      font-size: 44px;
+      line-height: 1.06;
+      letter-spacing: -0.03em;
+      color: var(--text-primary);
+    }
+
+    .subtitle {
+      max-width: 680px;
+      margin: 0 auto;
+      font-size: 17px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+    }
+
+    .content {
+      padding: 30px 38px 38px;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-bottom: 26px;
+    }
+
+    .stat-card {
+      padding: 20px 18px;
+      border: 1px solid var(--border-light);
+      border-radius: 20px;
+      background: var(--bg-subtle);
+      text-align: center;
+    }
+
+    .stat-number {
+      font-size: 34px;
+      font-weight: 900;
+      line-height: 1;
+      letter-spacing: -0.02em;
+      background: var(--gradient-primary);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      margin-bottom: 6px;
+    }
+
+    .stat-label {
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-primary);
+      line-height: 1.35;
+      margin-bottom: 4px;
+    }
+
+    .stat-sub {
+      font-size: 12px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+      margin: 0;
+    }
+
+    .highlight-box {
+      margin-bottom: 22px;
+      padding: 20px 22px;
+      border-radius: 20px;
+      background: linear-gradient(180deg, #FFFFFF 0%, #FFF7ED 100%);
+      border: 1px solid var(--light-accent);
+    }
+
+    .highlight-title {
+      margin: 0 0 8px;
+      font-size: 22px;
+      line-height: 1.2;
+      color: var(--text-primary);
+    }
+
+    .highlight-copy {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.7;
+      color: var(--text-secondary);
+    }
+
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      align-items: center;
+    }
+
+    .button-primary,
+    .button-secondary {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 54px;
+      padding: 0 22px;
+      border-radius: var(--radius-button);
+      font-size: 15px;
+      font-weight: 700;
+      text-decoration: none;
+      transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+    }
+
+    .button-primary {
+      background: var(--gradient-primary);
+      color: #FFFFFF;
+      box-shadow: var(--shadow-button);
+    }
+
+    .button-primary:hover {
+      transform: translateY(-1px);
+      opacity: 0.98;
+    }
+
+    .button-secondary {
+      background: #FFFFFF;
+      color: var(--text-primary);
+      border: 1px solid var(--border-light);
+    }
+
+    .button-secondary:hover {
+      background: #F8FAFC;
+    }
+
+    .note {
+      margin-top: 16px;
+      font-size: 13px;
+      line-height: 1.65;
+      color: var(--text-secondary);
+    }
+
+    .note strong {
+      color: var(--text-primary);
+    }
+
+    .gmail-only-notice {
+      margin-bottom: 22px;
+      padding: 16px 18px;
+      border-radius: 16px;
+      background: #FFFBEB;
+      border: 1px solid #FDE68A;
+      display: flex;
+      gap: 12px;
+      align-items: flex-start;
+    }
+
+    .gmail-only-notice-icon {
+      flex: 0 0 22px;
+      width: 22px;
+      height: 22px;
+      border-radius: 999px;
+      background: #F59E0B;
+      color: #FFFFFF;
+      font-size: 13px;
+      font-weight: 800;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      margin-top: 1px;
+    }
+
+    .gmail-only-notice-body {
+      flex: 1;
+      font-size: 13.5px;
+      line-height: 1.6;
+      color: #78350F;
+    }
+
+    .gmail-only-notice-body strong {
+      color: #422006;
+    }
+
+    @media (max-width: 720px) {
+      .page {
+        padding: 14px;
+      }
+
+      .hero,
+      .content {
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+
+      h1 {
+        font-size: 32px;
+      }
+
+      .subtitle {
+        font-size: 15px;
+      }
+
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .actions {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .button-primary,
+      .button-secondary {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="wrapper">
+      <div class="top-pill-wrap">
+        <div class="top-pill">
+          <span class="top-pill-dot"></span>
+          OfficeFlow onboarding
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="hero">
+          <img class="logo" src="/OfficeFlow-logo.png" alt="OfficeFlow logo" />
+
+          <div class="success-badge">
+            <span class="success-badge-dot"></span>
+            Setup voltooid
+          </div>
+
+          <h1 id="heroTitle">OfficeFlow staat live</h1>
+          <p class="subtitle" id="heroSubtitle">
+            Je Gmail is gekoppeld, je voorkeuren zijn opgeslagen en je eerste drafts staan klaar in Gmail.
+          </p>
+        </div>
+
+        <div class="content">
+          <div class="stats-grid" id="statsGrid">
+            <div class="stat-card">
+              <div class="stat-number" id="statProcessed">—</div>
+              <div class="stat-label">Mails verwerkt</div>
+              <p class="stat-sub">Geclassificeerd en voorzien van label</p>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="statDrafts">—</div>
+              <div class="stat-label">Drafts aangemaakt</div>
+              <p class="stat-sub">Staan klaar in Gmail ter review</p>
+            </div>
+            <div class="stat-card">
+              <div class="stat-number" id="statLabels">—</div>
+              <div class="stat-label">Labels actief</div>
+              <p class="stat-sub">Priority, To Respond, Done en meer</p>
+            </div>
+          </div>
+
+          <div class="highlight-box">
+            <h3 class="highlight-title" id="highlightTitle">Open Gmail om je drafts te zien</h3>
+            <p class="highlight-copy" id="highlightCopy">
+              OfficeFlow heeft je inbox gescand en concepten klaargezet in Gmail. Je bekijkt, past aan en verstuurt zelf — OfficeFlow verstuurt nooit automatisch.
+            </p>
+          </div>
+
+          <div class="gmail-only-notice" role="note">
+            <span class="gmail-only-notice-icon" aria-hidden="true">!</span>
+            <div class="gmail-only-notice-body">
+              <strong>Gebruik OfficeFlow alleen in Gmail.</strong>
+              Je AI-concepten verschijnen direct in de Gmail-thread met een verzendknop. In Apple Mail, Outlook of Thunderbird werkt dit niet goed — labels tonen geen kleuren en je kunt concepten daar niet netjes vanuit de thread versturen. Werk via <a href="https://mail.google.com" target="_blank" rel="noopener">mail.google.com</a> of de officiële Gmail-app op je telefoon.
+            </div>
+          </div>
+
+          <div class="actions">
+            <a class="button-primary" href="https://mail.google.com/mail/u/0/#inbox" target="_blank" rel="noopener noreferrer">
+              Open Gmail
+            </a>
+            <a class="button-secondary" href="https://officeflowcompany.com">
+              Terug naar OfficeFlow
+            </a>
+          </div>
+
+          <div class="note" id="footerNote">
+            Je drafts zijn <strong>niet</strong> verzonden. Alles blijft onder jouw controle.
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    (function () {
+      const params = new URLSearchParams(window.location.search);
+
+      const processedRaw = params.get("processed");
+      const draftsRaw = params.get("drafts");
+      const labelsRaw = params.get("labels");
+      const firstDraftRaw = params.get("first_draft");
+
+      function toNonNegativeInt(value) {
+        const n = parseInt(value, 10);
+        if (isNaN(n) || n < 0) return null;
+        return n;
+      }
+
+      const processed = toNonNegativeInt(processedRaw);
+      const drafts = toNonNegativeInt(draftsRaw);
+      const labels = toNonNegativeInt(labelsRaw);
+      const firstDraft = firstDraftRaw === "1";
+
+      const statProcessed = document.getElementById("statProcessed");
+      const statDrafts = document.getElementById("statDrafts");
+      const statLabels = document.getElementById("statLabels");
+      const heroTitle = document.getElementById("heroTitle");
+      const heroSubtitle = document.getElementById("heroSubtitle");
+      const highlightTitle = document.getElementById("highlightTitle");
+      const highlightCopy = document.getElementById("highlightCopy");
+      const footerNote = document.getElementById("footerNote");
+
+      if (processed !== null) statProcessed.textContent = String(processed);
+      if (drafts !== null) statDrafts.textContent = String(drafts);
+      if (labels !== null) statLabels.textContent = String(labels);
+
+      // Geen stats in URL = directe landing, fallback blijft staan
+      if (processed === null && drafts === null && labels === null) {
+        statProcessed.textContent = "—";
+        statDrafts.textContent = "—";
+        statLabels.textContent = "—";
+        heroSubtitle.textContent = "Je Gmail is gekoppeld en OfficeFlow is actief. Labels en drafts verschijnen in Gmail zodra nieuwe mail binnenkomt.";
+        return;
+      }
+
+      // Tune copy naar daadwerkelijke uitkomst
+      if (drafts !== null && drafts > 0) {
+        highlightTitle.textContent = drafts === 1
+          ? "Je eerste draft staat klaar in Gmail"
+          : `Je eerste ${drafts} drafts staan klaar in Gmail`;
+        highlightCopy.textContent = "Open Gmail, controleer de concepten en verstuur zelf. OfficeFlow verstuurt nooit automatisch.";
+      } else if (processed !== null && processed > 0 && (drafts === 0 || drafts === null)) {
+        highlightTitle.textContent = "Je inbox is klaar voor OfficeFlow";
+        highlightCopy.textContent = "Er waren nu geen mails die een draft nodig hadden. Zodra er Priority of To Respond mail binnenkomt, zet OfficeFlow automatisch een concept klaar.";
+      } else if (!firstDraft) {
+        highlightTitle.textContent = "Je inbox is klaar voor OfficeFlow";
+        highlightCopy.textContent = "Zodra er nieuwe mail binnenkomt die om een reactie vraagt, zet OfficeFlow automatisch een concept klaar in Gmail.";
+      }
+
+      footerNote.innerHTML = drafts !== null && drafts > 0
+        ? "Drafts zijn <strong>niet</strong> verzonden. Alles blijft onder jouw controle."
+        : "OfficeFlow verstuurt nooit automatisch. Jij blijft in controle over elke reply.";
+    })();
+  </script>
+</body>
+</html>

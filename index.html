@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OfficeFlow — Slimme tools voor jouw werkproces</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --orange:       #f97316;
+      --orange-dark:  #ea580c;
+      --orange-light: #fb923c;
+      --orange-soft:  #fed7aa;
+      --orange-bg:    #fff7ed;
+      --blue:         #4f46e5;
+      --blue-light:   #6366f1;
+      --blue-soft:    #c7d2fe;
+      --blue-bg:      #eef2ff;
+      --navy:         #08142f;
+      --navy-2:       #0b1a3a;
+      --navy-3:       #10224a;
+      --white:        #ffffff;
+      --bg:           #f8fafc;
+      --bg-warm:      #fffaf7;
+      --text:         #0f172a;
+      --text-2:       #64748b;
+      --border:       #e2e8f0;
+      --green:        #22c55e;
+      --grad-orange:  linear-gradient(135deg, #f97316 0%, #fb923c 100%);
+      --grad-blue:    linear-gradient(135deg, #4f46e5 0%, #6366f1 100%);
+      --grad-hero:    linear-gradient(135deg, #0f172a 0%, #f97316 55%, #4f46e5 100%);
+      --shadow:       0 4px 24px rgba(15,23,42,.07);
+      --shadow-lg:    0 20px 60px rgba(15,23,42,.10);
+      --r: 16px;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; }
+    body { font-family: 'Plus Jakarta Sans', sans-serif; background: var(--white); color: var(--text); overflow-x: hidden; -webkit-font-smoothing: antialiased; }
+    a { color: inherit; text-decoration: none; }
+    .wrap { max-width: 1160px; margin: 0 auto; padding: 0 28px; }
+
+    /* NAV */
+    nav { position: sticky; top: 0; z-index: 100; background: rgba(255,255,255,.94); backdrop-filter: blur(20px); border-bottom: 1px solid var(--border); }
+    .nav-inner { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; gap: 20px; }
+    .logo-img { height: 36px; width: auto; }
+    .nav-links { display: flex; align-items: center; gap: 2px; }
+    .nav-links a { font-size: 14px; font-weight: 500; color: var(--text-2); padding: 8px 14px; border-radius: 8px; transition: color .2s, background .2s; }
+    .nav-links a:hover { color: var(--text); background: var(--bg); }
+    .nav-right { display: flex; align-items: center; gap: 10px; }
+
+    .btn { display: inline-flex; align-items: center; gap: 8px; font-family: 'Plus Jakarta Sans', sans-serif; font-size: 14px; font-weight: 600; padding: 11px 22px; border-radius: 10px; transition: all .2s ease; cursor: pointer; border: none; white-space: nowrap; line-height: 1; }
+    .btn:hover { transform: translateY(-1px); }
+    .btn-ghost { background: transparent; color: var(--text-2); border: 1.5px solid var(--border); }
+    .btn-ghost:hover { border-color: var(--text); color: var(--text); }
+    .btn-orange { background: var(--grad-orange); color: #fff; box-shadow: 0 4px 16px rgba(249,115,22,.28); }
+    .btn-orange:hover { box-shadow: 0 8px 24px rgba(249,115,22,.4); }
+    .btn-blue { background: var(--grad-blue); color: #fff; box-shadow: 0 4px 16px rgba(79,70,229,.28); }
+    .btn-blue:hover { box-shadow: 0 8px 24px rgba(79,70,229,.4); }
+    .btn-lg { padding: 15px 30px; font-size: 15px; border-radius: 12px; }
+
+    /* HERO */
+    .hero { padding: 72px 0 88px; background: linear-gradient(180deg, #ffffff 0%, #fdfaf5 100%); position: relative; overflow: hidden; }
+    .hero::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 8% 20%, rgba(249,115,22,.05) 0%, transparent 40%), radial-gradient(circle at 88% 10%, rgba(79,70,229,.04) 0%, transparent 35%); }
+    .hero-inner {
+      position: relative; z-index: 1;
+      max-width: 1200px; margin: 0 auto;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+      gap: 56px;
+      align-items: center;
+    }
+    .hero-content { text-align: left; }
+    .hero-visual { position: relative; }
+    .hero-badge { display: inline-flex; align-items: center; gap: 8px; background: var(--white); border: 1.5px solid var(--border); border-radius: 999px; padding: 7px 16px; font-size: 12px; font-weight: 600; letter-spacing: .03em; color: var(--text-2); margin-bottom: 26px; }
+    .badge-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(34,197,94,.2); }
+    h1 { font-size: clamp(36px, 4.6vw, 56px); font-weight: 800; line-height: 1.1; letter-spacing: -.025em; margin-bottom: 20px; }
+    .h1-grad { background: var(--grad-hero); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; }
+    .hero-sub { font-size: 17px; font-weight: 400; color: var(--text-2); line-height: 1.7; max-width: 560px; margin: 0 0 32px; }
+    .hero-sub strong { color: var(--text); font-weight: 600; }
+    .hero-cta { display: flex; justify-content: flex-start; gap: 12px; flex-wrap: wrap; margin-bottom: 28px; }
+    .hero-trust { display: flex; justify-content: flex-start; align-items: center; gap: 18px; flex-wrap: wrap; font-size: 12.5px; color: var(--text-2); font-weight: 500; }
+    .trust-item { display: flex; align-items: center; gap: 6px; }
+    .trust-item svg { color: var(--green); }
+
+    @media (max-width: 980px) {
+      .hero-inner { grid-template-columns: 1fr; gap: 48px; text-align: center; }
+      .hero-content { text-align: center; }
+      .hero-sub { margin-left: auto; margin-right: auto; }
+      .hero-cta, .hero-trust { justify-content: center; }
+    }
+
+    /* SECTIONS */
+    section { padding: 96px 0; }
+    .eyebrow { display: inline-flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; margin-bottom: 14px; }
+    .ey-orange { color: var(--orange-dark); }
+    .ey-orange::before { content: ''; width: 18px; height: 2px; background: var(--orange); border-radius: 1px; display: inline-block; }
+    .ey-blue { color: var(--blue); }
+    .ey-blue::before { content: ''; width: 18px; height: 2px; background: var(--blue-light); border-radius: 1px; display: inline-block; }
+    .ey-light { color: rgba(255,255,255,.4); }
+    .ey-light::before { content: ''; width: 18px; height: 2px; background: rgba(255,255,255,.25); border-radius: 1px; display: inline-block; }
+    h2 { font-size: clamp(30px, 3.8vw, 46px); font-weight: 800; line-height: 1.1; letter-spacing: -.025em; margin-bottom: 16px; }
+    .sub { font-size: 17px; font-weight: 400; color: var(--text-2); line-height: 1.75; }
+    .sub strong { color: var(--text); font-weight: 600; }
+
+    /* PRODUCTS */
+    .products-bg { background: linear-gradient(180deg, #fdfaf5 0%, #fbf5ec 100%); }
+    .products-header { text-align: center; margin-bottom: 16px; }
+    .products-header .sub { max-width: 580px; margin: 0 auto 18px; }
+    .standalone-notice {
+      display: inline-flex; align-items: center; gap: 8px;
+      background: var(--white); border: 1.5px solid var(--border);
+      border-radius: 10px; padding: 10px 18px; margin-bottom: 44px;
+      font-size: 13px; font-weight: 600; color: var(--text-2);
+    }
+    .standalone-notice svg { color: var(--text-2); flex-shrink: 0; }
+    .products-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .pcard { background: var(--white); border-radius: 20px; border: 1.5px solid var(--border); overflow: hidden; box-shadow: var(--shadow); transition: transform .25s, box-shadow .25s, border-color .25s; }
+    .pcard:hover { transform: translateY(-5px); box-shadow: var(--shadow-lg); }
+    .pcard-orange:hover { border-color: var(--orange); }
+    .pcard-blue:hover { border-color: var(--blue-light); }
+    .pcard-header { padding: 36px 36px 28px; }
+    .ptag { display: inline-flex; align-items: center; gap: 7px; font-size: 11px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; padding: 6px 13px; border-radius: 8px; margin-bottom: 22px; }
+    .ptag-orange { background: var(--orange-bg); color: var(--orange-dark); }
+    .ptag-blue { background: var(--blue-bg); color: var(--blue); }
+    .pcard h3 { font-size: 28px; font-weight: 800; letter-spacing: -.02em; margin-bottom: 12px; line-height: 1.15; }
+    .pcard-desc { font-size: 15px; color: var(--text-2); line-height: 1.75; margin-bottom: 24px; }
+    .pcard-price { display: flex; align-items: baseline; gap: 6px; }
+    .price-num { font-size: 44px; font-weight: 800; letter-spacing: -.03em; line-height: 1; }
+    .price-orange { color: var(--orange); }
+    .price-blue { color: var(--blue); }
+    .price-sub { font-size: 14px; color: var(--text-2); }
+    .pcard-divider { height: 1px; background: var(--border); margin: 0 36px; }
+    .pcard-body { padding: 28px 36px 36px; }
+    .feat-list { list-style: none; display: grid; gap: 11px; margin-bottom: 28px; }
+    .feat-list li { display: flex; align-items: flex-start; gap: 10px; font-size: 14px; color: var(--text-2); line-height: 1.5; }
+    .feat-list li svg { flex-shrink: 0; margin-top: 2px; }
+    .fl-orange li svg { color: var(--orange); }
+    .fl-blue li svg { color: var(--blue-light); }
+    .pcard-actions { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+    .card-link { font-size: 14px; font-weight: 600; color: var(--text-2); border-bottom: 1.5px solid var(--border); padding-bottom: 1px; transition: color .2s, border-color .2s; }
+    .card-link:hover { color: var(--text); border-color: var(--text); }
+
+    /* HOW IT WORKS — DARK */
+    .how-bg { background: linear-gradient(180deg, #0a1530 0%, var(--navy) 50%, #0b1a3a 100%); position: relative; }
+    .how-bg::before, .how-bg::after { content: ''; position: absolute; left: 0; right: 0; height: 1px; pointer-events: none; }
+    .how-bg::before { top: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent); }
+    .how-bg::after { bottom: 0; background: linear-gradient(90deg, transparent, rgba(255,255,255,.05), transparent); }
+    .how-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-top: 56px; }
+    .how-col { border-radius: 16px; overflow: hidden; border: 1px solid rgba(255,255,255,.07); }
+    .how-col-head { display: flex; align-items: center; gap: 12px; padding: 18px 22px; border-bottom: 1px solid rgba(255,255,255,.07); }
+    .hch-o { background: rgba(249,115,22,.09); }
+    .hch-b { background: rgba(79,70,229,.09); }
+    .how-col-icon { width: 36px; height: 36px; border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .hci-o { background: var(--grad-orange); }
+    .hci-b { background: var(--grad-blue); }
+    .how-col-icon svg { color: #fff; }
+    .how-col-title { font-size: 15px; font-weight: 700; color: #fff; }
+    .how-col-price { font-size: 13px; color: rgba(255,255,255,.35); margin-top: 2px; }
+    .how-steps { display: flex; flex-direction: column; }
+    .how-step { display: flex; gap: 14px; padding: 18px 22px; border-bottom: 1px solid rgba(255,255,255,.05); background: rgba(255,255,255,.02); transition: background .2s; }
+    .how-step:last-child { border-bottom: none; }
+    .how-step:hover { background: rgba(255,255,255,.04); }
+    .snum { width: 22px; height: 22px; border-radius: 6px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; margin-top: 1px; font-size: 10px; font-weight: 700; }
+    .sn-o { background: rgba(249,115,22,.18); color: var(--orange-light); }
+    .sn-b { background: rgba(99,102,241,.18); color: #818cf8; }
+    .step-title { font-size: 13px; font-weight: 600; color: rgba(255,255,255,.8); margin-bottom: 4px; }
+    .step-body { font-size: 12px; color: rgba(255,255,255,.35); line-height: 1.65; }
+    .step-body strong { color: rgba(255,255,255,.6); font-weight: 600; }
+
+    /* MINI VISUALS */
+    .mini-visual { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; overflow: hidden; margin-top: 10px; }
+    .mv-head { background: rgba(255,255,255,.04); padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.06); display: flex; align-items: center; justify-content: space-between; }
+    .mv-dots { display: flex; gap: 4px; }
+    .mv-dots span { width: 7px; height: 7px; border-radius: 50%; background: rgba(255,255,255,.1); }
+    .mv-title { font-size: 10px; color: rgba(255,255,255,.2); letter-spacing: .04em; }
+    .mv-count { font-size: 10px; color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); padding: 2px 7px; border-radius: 999px; }
+    .mv-row { display: flex; align-items: center; justify-content: space-between; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.04); gap: 8px; }
+    .mv-row:last-child { border-bottom: none; }
+    .mv-name { font-size: 11px; color: rgba(255,255,255,.5); font-weight: 500; flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mv-amount { font-size: 11px; color: rgba(255,255,255,.28); }
+    .mv-lbl { padding: 2px 7px; border-radius: 4px; font-size: 9px; font-weight: 700; letter-spacing: .05em; flex-shrink: 0; }
+    .ml-p { background: rgba(249,115,22,.18); color: var(--orange-light); }
+    .ml-r { background: rgba(99,102,241,.18); color: #818cf8; }
+    .ml-w { background: rgba(168,85,247,.14); color: #c084fc; }
+    .ml-d { background: rgba(34,197,94,.14); color: #4ade80; }
+    .ml-i { background: rgba(255,255,255,.07); color: rgba(255,255,255,.3); }
+    .mv-ai { font-size: 9px; background: rgba(249,115,22,.18); color: var(--orange-light); padding: 2px 6px; border-radius: 3px; font-weight: 700; }
+    .ml-beo { background: rgba(249,115,22,.18); color: var(--orange-light); }
+    .ml-ver { background: rgba(99,102,241,.18); color: #818cf8; }
+    .ml-bet { background: rgba(34,197,94,.14); color: #4ade80; }
+    .ml-her { background: rgba(168,85,247,.14); color: #c084fc; }
+
+    .standalone-bar { background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.09); border-radius: 12px; padding: 18px 22px; margin-top: 32px; display: flex; align-items: flex-start; gap: 12px; }
+    .sb-icon { width: 36px; height: 36px; border-radius: 8px; background: rgba(255,255,255,.06); display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+    .sb-icon svg { color: rgba(255,255,255,.35); }
+    .sb-text { font-size: 13px; color: rgba(255,255,255,.38); line-height: 1.65; }
+    .sb-text strong { color: rgba(255,255,255,.7); font-weight: 600; }
+
+    /* WHY */
+    .why-bg { background: linear-gradient(180deg, #fbf5ec 0%, #fdfaf5 100%); }
+    .why-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-top: 52px; }
+    .why-card { background: var(--white); border: 1.5px solid var(--border); border-radius: 16px; padding: 30px; transition: border-color .2s, transform .2s, box-shadow .2s; }
+    .why-card:hover { border-color: var(--orange-soft); transform: translateY(-3px); box-shadow: var(--shadow-lg); }
+    .why-icon { width: 44px; height: 44px; border-radius: 12px; background: var(--orange-bg); display: flex; align-items: center; justify-content: center; margin-bottom: 18px; }
+    .why-icon svg { color: var(--orange); }
+    .why-title { font-size: 17px; font-weight: 700; margin-bottom: 8px; letter-spacing: -.01em; }
+    .why-body { font-size: 14px; color: var(--text-2); line-height: 1.75; }
+
+    /* TESTIMONIALS */
+    .testi-bg { background: linear-gradient(180deg, #fdfaf5 0%, #fef8ef 100%); overflow: hidden; }
+    .testi-card {
+      background: var(--white); border: 1.5px solid var(--border); border-radius: 16px; padding: 32px;
+      display: flex; flex-direction: column;
+    }
+    .testi-stars { font-size: 14px; letter-spacing: 2px; color: var(--orange); margin-bottom: 16px; }
+    .testi-stars .star-dim { color: #cbd5e1; }
+    .testi-quote { font-size: 16px; color: var(--text); line-height: 1.65; margin-bottom: 22px; font-style: italic; flex: 1; }
+    .testi-sep { width: 28px; height: 2px; background: var(--orange-soft); border-radius: 1px; margin-bottom: 16px; }
+    .testi-name { font-size: 14px; font-weight: 700; }
+    .testi-role { font-size: 13px; color: var(--text-2); margin-top: 3px; }
+
+    /* Auto-scrolling testimonials carousel */
+    .testi-carousel {
+      position: relative;
+      margin-top: 48px;
+      overflow: hidden;
+      /* soft fade on left/right edges */
+      -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 80px, #000 calc(100% - 80px), transparent 100%);
+              mask-image: linear-gradient(90deg, transparent 0, #000 80px, #000 calc(100% - 80px), transparent 100%);
+    }
+    .testi-track {
+      display: flex;
+      gap: 20px;
+      width: max-content;
+      animation: testiScroll 60s linear infinite;
+    }
+    .testi-carousel:hover .testi-track { animation-play-state: paused; }
+    @keyframes testiScroll {
+      from { transform: translateX(0); }
+      to   { transform: translateX(-50%); }
+    }
+    .testi-carousel .testi-card {
+      width: 380px;
+      flex: 0 0 380px;
+      padding: 28px 30px;
+    }
+    @media (max-width: 640px) {
+      .testi-carousel .testi-card { width: 300px; flex: 0 0 300px; padding: 24px; }
+      .testi-carousel .testi-quote { font-size: 15px; }
+    }
+
+    /* FAQ */
+    .faq-bg { background: linear-gradient(180deg, #fef8ef 0%, #fdfaf5 100%); }
+    .faq-wrap { max-width: 760px; margin: 0 auto; }
+    .faq-head { text-align: center; margin-bottom: 48px; }
+    .faq-head .eyebrow { justify-content: center; }
+    .faq-list { display: flex; flex-direction: column; gap: 12px; }
+    .faq-item {
+      background: var(--white);
+      border: 1.5px solid var(--border);
+      border-radius: 14px;
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .faq-item[open] { border-color: rgba(249,115,22,.35); box-shadow: 0 8px 24px rgba(15,23,42,.05); }
+    .faq-item summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 20px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      font-size: 16px;
+      font-weight: 600;
+      color: var(--text);
+    }
+    .faq-item summary::-webkit-details-marker { display: none; }
+    .faq-icon {
+      width: 22px; height: 22px; flex-shrink: 0;
+      border-radius: 50%;
+      background: #fff4e6;
+      color: var(--orange);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 14px; font-weight: 700;
+      transition: transform .2s;
+    }
+    .faq-item[open] .faq-icon { transform: rotate(45deg); background: var(--orange); color: #fff; }
+    .faq-answer { padding: 0 24px 22px 24px; color: var(--text-2); font-size: 15px; line-height: 1.7; }
+    .faq-answer strong { color: var(--text); font-weight: 600; }
+
+    /* CTA */
+    .cta-bg { background: linear-gradient(180deg, #08142f 0%, #050e25 100%); position: relative; overflow: hidden; }
+    .cta-bg::before { content: ''; position: absolute; inset: 0; pointer-events: none; background: radial-gradient(circle at 15% 50%, rgba(249,115,22,.13) 0%, transparent 40%), radial-gradient(circle at 85% 50%, rgba(79,70,229,.13) 0%, transparent 40%); }
+    .cta-bg::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: linear-gradient(90deg, transparent, rgba(255,255,255,.08), transparent); pointer-events: none; }
+    .cta-inner { position: relative; z-index: 1; text-align: center; max-width: 640px; margin: 0 auto; }
+    .cta-inner h2 { color: #fff; }
+    .cta-inner p { color: rgba(255,255,255,.45); font-size: 17px; line-height: 1.75; margin: 16px 0 40px; }
+    .cta-btns { display: flex; justify-content: center; gap: 14px; flex-wrap: wrap; }
+    .cta-fine { margin-top: 18px; font-size: 12px; color: rgba(255,255,255,.22); display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+
+    /* FOOTER */
+    footer { background: #050b18; padding: 56px 0 36px; }
+    .footer-grid { display: grid; grid-template-columns: 1.6fr 1fr 1fr; gap: 40px; padding-bottom: 36px; border-bottom: 1px solid rgba(255,255,255,.06); }
+    .footer-logo-img { height: 34px; width: auto; margin-bottom: 14px; filter: brightness(0) invert(1); opacity: .65; }
+    .footer-desc { font-size: 13px; color: rgba(255,255,255,.28); line-height: 1.75; }
+    .footer-col-title { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: rgba(255,255,255,.22); margin-bottom: 16px; font-weight: 600; }
+    .footer-links { display: flex; flex-direction: column; gap: 10px; }
+    .footer-links a { font-size: 13px; color: rgba(255,255,255,.36); transition: color .2s; }
+    .footer-links a:hover { color: rgba(255,255,255,.75); }
+    .footer-bottom { padding-top: 24px; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+    .footer-copy { font-size: 12px; color: rgba(255,255,255,.18); }
+
+    /* ANIMATIONS */
+    .reveal { opacity: 0; transform: translateY(22px); transition: opacity .65s ease, transform .65s ease; }
+    .reveal.in { opacity: 1; transform: translateY(0); }
+    .rd1 { transition-delay: .08s; } .rd2 { transition-delay: .17s; } .rd3 { transition-delay: .26s; }
+
+    @media (max-width: 960px) {
+      .products-grid, .how-grid, .testi-grid { grid-template-columns: 1fr; }
+      .why-grid { grid-template-columns: 1fr 1fr; }
+      .footer-grid { grid-template-columns: 1fr 1fr; }
+    }
+    @media (max-width: 640px) {
+      .nav-links { display: none; }
+      .why-grid, .footer-grid { grid-template-columns: 1fr; }
+      section { padding: 72px 0; }
+      .hero-cta .btn, .cta-btns .btn { width: 100%; justify-content: center; }
+    }
+
+    /* ============ WORDMARK LOGO + HERO ENHANCEMENTS ============ */
+
+    /* Wordmark logo (replaces PNG in nav) */
+    .logo-link { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; }
+    .logo-mark {
+      width: 30px; height: 30px; border-radius: 8px;
+      background: linear-gradient(135deg, var(--orange) 0%, var(--blue) 100%);
+      display: inline-block;
+      box-shadow: 0 3px 10px rgba(79,70,229,.18), 0 2px 6px rgba(249,115,22,.14);
+      flex-shrink: 0;
+    }
+    .logo-wordmark {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 24px;
+      font-weight: 800;
+      letter-spacing: -.02em;
+      color: var(--navy);
+      line-height: 1;
+      white-space: nowrap;
+    }
+    .logo-wordmark .flow { color: var(--orange); }
+
+    /* Footer wordmark variant — on dark background */
+    .footer-logo { display: inline-flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+    .footer-logo .logo-mark { width: 26px; height: 26px; border-radius: 7px; }
+    .footer-logo-text {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      font-size: 20px; font-weight: 800; letter-spacing: -.02em;
+      color: rgba(255,255,255,.9); line-height: 1;
+    }
+    .footer-logo-text .flow { color: var(--orange-light); }
+
+    /* Hero: fuller background with bigger ambient orbs */
+    .hero { padding: 72px 0 96px; }
+    .hero-orbs { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 0; }
+    .orb { position: absolute; border-radius: 50%; filter: blur(70px); }
+    .orb-1 { width: 540px; height: 540px; background: rgba(249,115,22,.22); top: -140px; left: -160px; }
+    .orb-2 { width: 480px; height: 480px; background: rgba(79,70,229,.18); top: -80px; right: -140px; }
+    .orb-3 { width: 380px; height: 380px; background: rgba(251,146,60,.16); bottom: -160px; left: 50%; transform: translateX(-50%); }
+
+    /* Floating chips in the hero corners */
+    .hero-chip {
+      position: absolute; z-index: 2;
+      display: inline-flex; align-items: center; gap: 9px;
+      background: rgba(255,255,255,.96);
+      -webkit-backdrop-filter: blur(10px);
+      backdrop-filter: blur(10px);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 10px 16px;
+      font-size: 12.5px; font-weight: 600; color: var(--text);
+      box-shadow: 0 10px 32px rgba(15,23,42,.07);
+      white-space: nowrap;
+    }
+    .hero-chip strong { color: var(--orange-dark); font-weight: 700; }
+    .chip-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+    .dot-orange { background: var(--orange); box-shadow: 0 0 0 3px rgba(249,115,22,.15); }
+    .dot-green  { background: var(--green);  box-shadow: 0 0 0 3px rgba(34,197,94,.15); }
+    .dot-blue   { background: var(--blue-light); box-shadow: 0 0 0 3px rgba(99,102,241,.15); }
+    .chip-tl { top: 120px; left: 32px;  animation: heroFloat 6s ease-in-out infinite; }
+    .chip-tr { top: 88px;  right: 32px; animation: heroFloat 7s ease-in-out .8s infinite; }
+    .chip-bl { bottom: 180px; left: 44px;  animation: heroFloat 8s ease-in-out 1.6s infinite; }
+    .chip-br { bottom: 150px; right: 40px; animation: heroFloat 6.5s ease-in-out 2.2s infinite; }
+    @keyframes heroFloat { 0%,100%{transform:translateY(0);} 50%{transform:translateY(-8px);} }
+
+    /* Trust logos strip */
+    .hero-stack { margin-top: 40px; font-size: 12px; color: var(--text-2); font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+    .hero-stack-row { display: inline-flex; align-items: center; gap: 18px; flex-wrap: wrap; justify-content: center; margin-top: 14px; }
+    .hero-stack-item { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--text-2); text-transform: none; letter-spacing: 0; padding: 6px 12px; background: var(--white); border: 1px solid var(--border); border-radius: 8px; }
+
+    /* Hero dual-product live dashboard — luxe, compact, scrollable */
+    .hero-dashboard {
+      width: 100%; margin: 0;
+      text-align: left; position: relative; z-index: 1;
+      background: #fff;
+      border-radius: 20px;
+      border: 1px solid var(--border);
+      box-shadow: 0 40px 90px -20px rgba(15,23,42,.22), 0 12px 28px -8px rgba(15,23,42,.08), 0 0 0 1px rgba(255,255,255,.6) inset;
+      overflow: hidden;
+    }
+    .hero-dash-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 13px 18px;
+      background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+      border-bottom: 1px solid var(--border);
+    }
+    .dash-title { font-size: 12.5px; font-weight: 700; color: var(--text); letter-spacing: -.005em; }
+    .dash-date { font-size: 11.5px; color: var(--text-2); font-weight: 500; display: inline-flex; align-items: center; gap: 7px; }
+    .dash-live { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(34,197,94,.2); animation: dashPulse 2s ease-in-out infinite; }
+    @keyframes dashPulse { 0%,100%{opacity:1;} 50%{opacity:.45;} }
+
+    .hero-dash-grid {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 1px; background: var(--border);
+    }
+    .dash-card { padding: 16px 18px 14px; display: flex; flex-direction: column; min-width: 0; background: #ffffff; }
+    .dash-card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .dash-tag { font-size: 9.5px; font-weight: 800; letter-spacing: .08em; padding: 4px 9px; border-radius: 6px; }
+    .dash-tag-orange { background: var(--orange-bg); color: var(--orange-dark); }
+    .dash-tag-blue { background: var(--blue-bg); color: var(--blue); }
+    .dash-pulse {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--green); box-shadow: 0 0 0 3px rgba(34,197,94,.18);
+      animation: dashPulse 2.2s ease-in-out infinite;
+    }
+
+    /* One-line summary replaces the boxed stats */
+    .dash-summary {
+      font-size: 11.5px; color: var(--text-2); font-weight: 500;
+      margin-bottom: 10px; line-height: 1.4;
+      padding-bottom: 10px; border-bottom: 1px solid rgba(15,23,42,.05);
+    }
+    .dash-summary strong { color: var(--text); font-weight: 700; }
+    .dash-summary .sum-o { color: var(--orange-dark); font-weight: 700; }
+    .dash-summary .sum-b { color: var(--blue); font-weight: 700; }
+
+    /* Scrollable flat list — no per-item boxing */
+    .dash-scroll {
+      max-height: 250px;
+      overflow-y: auto;
+      padding-right: 2px;
+      margin-right: -2px;
+      display: flex; flex-direction: column;
+      scrollbar-width: thin;
+      scrollbar-color: #e2e8f0 transparent;
+    }
+    .dash-scroll::-webkit-scrollbar { width: 4px; }
+    .dash-scroll::-webkit-scrollbar-track { background: transparent; }
+    .dash-scroll::-webkit-scrollbar-thumb { background: #e2e8f0; border-radius: 10px; }
+
+    /* Mail item — flat, clean row */
+    .mail-item {
+      padding: 9px 8px;
+      border-radius: 7px;
+      display: flex; align-items: center; gap: 10px;
+      transition: background .15s;
+      position: relative;
+    }
+    .mail-item + .mail-item::before {
+      content: ''; position: absolute; top: 0; left: 8px; right: 8px;
+      height: 1px; background: rgba(15,23,42,.05);
+    }
+    .mail-item:hover { background: rgba(249,115,22,.045); }
+    .mail-item:hover::before, .mail-item:hover + .mail-item::before { background: transparent; }
+
+    .mail-avatar {
+      width: 26px; height: 26px; border-radius: 50%;
+      background: #f97316;
+      color: #fff; font-size: 12px; font-weight: 600;
+      display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+    }
+    .mail-avatar.av-b { background: #1a73e8; }
+    .mail-avatar.av-g { background: #34a853; }
+    .mail-avatar.av-p { background: #9333ea; }
+    .mail-avatar.av-r { background: #ea4335; }
+
+    .mail-body { flex: 1; min-width: 0; overflow: hidden; }
+    .mail-sender { font-size: 12px; font-weight: 700; color: var(--text); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .mail-subject { font-size: 10.5px; color: var(--text-2); line-height: 1.3; margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-weight: 400; }
+
+    .mail-right { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .mail-ai {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 16px; height: 16px;
+      color: var(--orange); opacity: .75;
+    }
+    .mail-ai svg { width: 11px; height: 11px; }
+
+    .mail-tag {
+      font-size: 8.5px; font-weight: 800; letter-spacing: .06em;
+      padding: 3px 7px; border-radius: 4px; flex-shrink: 0;
+    }
+    .tag-pri { background: rgba(239,68,68,.12); color: #dc2626; }
+    .tag-res { background: rgba(99,102,241,.12); color: #4f46e5; }
+    .tag-fol { background: rgba(245,158,11,.14); color: #b45309; }
+    .tag-wai { background: rgba(168,85,247,.12); color: #9333ea; }
+    .tag-don { background: rgba(34,197,94,.12); color: #16a34a; }
+
+    /* Invoice/offer item — flat row, no boxing */
+    .inv-item {
+      padding: 9px 8px;
+      border-radius: 7px;
+      display: flex; align-items: center; gap: 10px;
+      transition: background .15s;
+      position: relative;
+    }
+    .inv-item + .inv-item::before {
+      content: ''; position: absolute; top: 0; left: 8px; right: 8px;
+      height: 1px; background: rgba(15,23,42,.05);
+    }
+    .inv-item:hover { background: rgba(79,70,229,.04); }
+    .inv-item:hover::before, .inv-item:hover + .inv-item::before { background: transparent; }
+
+    .inv-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .inv-left { flex: 1; min-width: 0; }
+    .inv-ref { font-size: 12px; font-weight: 700; color: var(--text); line-height: 1.2; }
+    .inv-client { font-size: 10.5px; color: var(--text-2); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .inv-right { text-align: right; flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+    .inv-amount { font-size: 12px; font-weight: 800; color: var(--text); letter-spacing: -.01em; line-height: 1; }
+    .inv-badge {
+      font-size: 8.5px; font-weight: 800; letter-spacing: .06em;
+      padding: 2px 6px; border-radius: 4px;
+      display: inline-block;
+    }
+    .b-paid { background: rgba(34,197,94,.12); color: #16a34a; }
+    .b-sent { background: rgba(99,102,241,.12); color: #4f46e5; }
+    .b-over { background: rgba(239,68,68,.12); color: #dc2626; }
+    .b-conc { background: rgba(245,158,11,.14); color: #b45309; }
+    .b-draf { background: rgba(148,163,184,.18); color: #475569; }
+
+    .dot-red   { background: #ef4444; box-shadow: 0 0 0 3px rgba(239,68,68,.15); }
+    .dot-amber { background: #f59e0b; box-shadow: 0 0 0 3px rgba(245,158,11,.15); }
+
+    /* Hide floating chips on smaller screens so hero stays clean */
+    @media (max-width: 1100px) {
+      .hero-chip { display: none; }
+    }
+    @media (max-width: 720px) {
+      .hero-dash-grid { grid-template-columns: 1fr; }
+      .dash-scroll { max-height: 200px; }
+    }
+    @media (max-width: 640px) {
+      .hero-dashboard { max-width: 100%; margin-top: 0; }
+      .orb-1, .orb-2 { width: 340px; height: 340px; }
+    }
+  </style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap nav-inner">
+    <a href="index.html" class="logo-link" aria-label="OfficeFlow"><span class="logo-wordmark">Office<span class="flow">Flow</span></span></a>
+    <div class="nav-links">
+      <a href="#producten">Mailbox Manager</a>
+      <a href="#producten">Facturen &amp; Offertes</a>
+      <a href="#waarom">Waarom OfficeFlow</a>
+    </div>
+    <div class="nav-right">
+      <a class="btn btn-ghost" href="/login.html">Inloggen</a>
+      <a class="btn btn-orange" href="#producten">Bekijk producten →</a>
+    </div>
+  </div>
+</nav>
+
+<section class="hero">
+  <div class="hero-orbs" aria-hidden="true">
+    <span class="orb orb-1"></span>
+    <span class="orb orb-2"></span>
+    <span class="orb orb-3"></span>
+  </div>
+
+  <div class="wrap hero-inner">
+    <div class="hero-content">
+      <h1>Slimme tools voor<br><span class="h1-grad">jouw werkproces.</span></h1>
+      <p class="hero-sub">OfficeFlow biedt twee <strong>onafhankelijke producten</strong> — elk een specialist in zijn domein. E-mail automatisering of professionele facturatie en offertes. Kies één, of gebruik beide apart.</p>
+      <div class="hero-cta">
+        <a class="btn btn-orange btn-lg" href="/onboarding.html">Mailbox Manager — €24/mnd</a>
+        <a class="btn btn-blue btn-lg" href="/facturen/">Facturen &amp; Offertes — Vanaf €19</a>
+      </div>
+      <div class="hero-trust">
+        <div class="trust-item"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Geen verplichte koppeling</div>
+        <div class="trust-item"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Maandelijks opzegbaar</div>
+        <div class="trust-item"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Nooit auto-send</div>
+      </div>
+    </div>
+
+    <div class="hero-visual">
+      <!-- Dual-product live overview dashboard — luxe, scrollable -->
+      <div class="hero-dashboard">
+        <div class="hero-dash-head">
+          <div class="dash-title">OfficeFlow · Overzicht</div>
+          <div class="dash-date"><span class="dash-live"></span>Dinsdag 21 april · Live</div>
+        </div>
+        <div class="hero-dash-grid">
+          <div class="dash-card dash-card-orange">
+            <div class="dash-card-head">
+              <span class="dash-tag dash-tag-orange">MAILBOX MANAGER</span>
+              <span class="dash-pulse"></span>
+            </div>
+            <div class="dash-summary"><span class="sum-o">12</span> mails geordend &middot; <span class="sum-o">4</span> AI concepten klaar</div>
+            <div class="dash-scroll">
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Karin Brouwer</div>
+                  <div class="mail-subject">Offerte voor renovatie keuken</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-ai" title="AI concept klaar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg></span>
+                  <span class="mail-tag tag-pri">PRIORITY</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Tom Visser</div>
+                  <div class="mail-subject">Kun je de factuur nog aanpassen?</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-ai" title="AI concept klaar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg></span>
+                  <span class="mail-tag tag-res">TO RESPOND</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Marloes Smit</div>
+                  <div class="mail-subject">Laatste update afspraak vrijdag</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-tag tag-fol">FOLLOW UP</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Ruben de Jong</div>
+                  <div class="mail-subject">Wacht op zijn bevestiging</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-tag tag-wai">WAITING</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Lotte Berends</div>
+                  <div class="mail-subject">Thanks, alles in orde nu</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-tag tag-don">DONE</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Sander Pauwels</div>
+                  <div class="mail-subject">Vraag over factuur #042</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-ai" title="AI concept klaar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg></span>
+                  <span class="mail-tag tag-res">TO RESPOND</span>
+                </div>
+              </div>
+              <div class="mail-item">
+                <div class="mail-body">
+                  <div class="mail-sender">Jeroen Hermans</div>
+                  <div class="mail-subject">Offerte volgende week toesturen</div>
+                </div>
+                <div class="mail-right">
+                  <span class="mail-tag tag-fol">FOLLOW UP</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="dash-card dash-card-blue">
+            <div class="dash-card-head">
+              <span class="dash-tag dash-tag-blue">FACTUREN &amp; OFFERTES</span>
+              <span class="dash-pulse"></span>
+            </div>
+            <div class="dash-summary"><span class="sum-b">€4.850</span> deze maand &middot; <span class="sum-b">3</span> openstaand</div>
+            <div class="dash-scroll">
+              <div class="inv-item">
+                <span class="inv-dot dot-green"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Factuur #041</div>
+                  <div class="inv-client">Brouwer Interieur B.V.</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€2.450</div>
+                  <span class="inv-badge b-paid">BETAALD</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-blue"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Offerte #018</div>
+                  <div class="inv-client">Visser Bouw &amp; Renovatie</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€1.820</div>
+                  <span class="inv-badge b-sent">VERSTUURD</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-amber"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Factuur #042</div>
+                  <div class="inv-client">Pauwels Consultancy</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€780</div>
+                  <span class="inv-badge b-sent">VERSTUURD</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-red"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Factuur #038</div>
+                  <div class="inv-client">Hermans Techniek</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€1.150</div>
+                  <span class="inv-badge b-over">TE LAAT</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-amber"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Offerte #019</div>
+                  <div class="inv-client">Berends Studio</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€3.400</div>
+                  <span class="inv-badge b-conc">CONCEPT</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-green"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Factuur #040</div>
+                  <div class="inv-client">De Jong Installaties</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€625</div>
+                  <span class="inv-badge b-paid">BETAALD</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot dot-blue"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Offerte #020</div>
+                  <div class="inv-client">Smit Catering</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">€2.150</div>
+                  <span class="inv-badge b-sent">VERSTUURD</span>
+                </div>
+              </div>
+              <div class="inv-item">
+                <span class="inv-dot" style="background:#cbd5e1;"></span>
+                <div class="inv-left">
+                  <div class="inv-ref">Factuur #043</div>
+                  <div class="inv-client">Nieuwe klant (nog niet ingevuld)</div>
+                </div>
+                <div class="inv-right">
+                  <div class="inv-amount">—</div>
+                  <span class="inv-badge b-draf">CONCEPT</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="producten" class="products-bg">
+  <div class="wrap">
+    <div class="products-header reveal">
+      <div class="eyebrow ey-orange">Twee producten</div>
+      <h2>Elk een specialist<br>in zijn eigen domein.</h2>
+      <p class="sub">Beide producten staan <strong>volledig los van elkaar.</strong> Geen gedeelde data, geen verplichte koppeling. Jij kiest wat relevant is voor jouw bedrijf.</p>
+    </div>
+    <div class="products-grid">
+      <div class="pcard pcard-orange reveal rd1">
+        <div class="pcard-header">
+          <div class="ptag ptag-orange"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 2H3v16h5l3 3 3-3h7V2z"></path></svg>E-mail automatisering</div>
+          <h3>Mailbox Manager</h3>
+          <p class="pcard-desc">AI die je Gmail-inbox begrijpt. Elke mail krijgt een status, mails die een reactie nodig hebben krijgen een conceptantwoord in jouw toon. Jij blijft in Gmail — OfficeFlow werkt op de achtergrond.</p>
+          <div class="pcard-price"><span class="price-num price-orange">€24</span><span class="price-sub">per maand<br>excl. btw</span></div>
+        </div>
+        <div class="pcard-divider"></div>
+        <div class="pcard-body">
+          <ul class="feat-list fl-orange">
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Automatische labels: Priority, To Respond, Done & meer</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Conceptreplies in jouw toon en schrijfstijl</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Nooit auto-send — jij beslist altijd</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Leert van jouw verstuurde mails</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Werkt in je bestaande Gmail — geen nieuwe app</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Koppeling via Google OAuth in 2 minuten</li>
+          </ul>
+          <div class="pcard-notice" style="background:#fff7ed; border:1px solid #fed7aa; border-radius:10px; padding:10px 12px; margin:0 0 14px 0; font-size:12.5px; color:#9a3412; line-height:1.45;">
+            <strong style="color:#c2410c;">⚠ Google verificatie in behandeling</strong><br>
+            De Mailbox-app wordt op dit moment door Google gecontroleerd. Je kunt de flow al doorlopen, maar de toegang is tijdelijk beperkt tot test-accounts.
+          </div>
+          <div class="pcard-actions">
+            <a class="btn btn-orange" href="/onboarding.html">Start Mailbox →</a>
+            <a class="card-link" href="/onboarding.html">Meer details</a>
+          </div>
+        </div>
+      </div>
+
+      <div class="pcard pcard-blue reveal rd2">
+        <div class="pcard-header">
+          <div class="ptag ptag-blue"><svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg>Facturen &amp; offertes</div>
+          <h3>Facturen &amp; Offertes</h3>
+          <p class="pcard-desc">Een compleet platform voor dienstverlenende bedrijven. Van offerte en abonnement tot werkregistratie, factuur, Moneybird-sync en betalingsopvolging — in één logische workflow.</p>
+          <div class="pcard-price"><span class="price-num price-blue">€19</span><span class="price-sub">per maand<br>excl. btw · tot €89</span></div>
+        </div>
+        <div class="pcard-divider"></div>
+        <div class="pcard-body">
+          <ul class="feat-list fl-blue">
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Offertes, abonnementen &amp; werkregistratie</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Automatische factuurcreatie met BTW-bewaking</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Moneybird provider-sync ingebouwd</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Herinneringen &amp; betalingsopvolging</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Slimme automatisering — altijd menselijke controle</li>
+            <li><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>Overzichtelijk dashboard met duidelijke volgende stap</li>
+          </ul>
+          <div class="pcard-actions">
+            <a class="btn btn-blue" href="/facturen/">Start gratis →</a>
+            <a class="card-link" href="/facturen/">Meer details</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="how-bg">
+  <div class="wrap">
+    <div class="eyebrow ey-light reveal">Hoe het werkt</div>
+    <h2 class="reveal" style="color:#fff; max-width:500px;">Twee specialisten.<br>Elk in hun eigen domein.</h2>
+    <p class="sub reveal" style="color:rgba(255,255,255,.4); max-width:500px;">Ze werken niet samen — dat is ook niet nodig. Elk product is een volwaardige oplossing op zichzelf.</p>
+    <div class="how-grid">
+      <div class="how-col reveal rd1">
+        <div class="how-col-head hch-o">
+          <div class="how-col-icon hci-o"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 2H3v16h5l3 3 3-3h7V2z"></path></svg></div>
+          <div><div class="how-col-title">Mailbox Manager</div><div class="how-col-price">E-mail automatisering · €24/mnd</div></div>
+        </div>
+        <div class="how-steps">
+          <div class="how-step">
+            <div class="snum sn-o">1</div>
+            <div><div class="step-title">Koppel je Gmail via Google OAuth</div><div class="step-body">In <strong>twee minuten</strong> verbonden. OfficeFlow krijgt leestoegang en mag concepten aanmaken — meer niet.</div></div>
+          </div>
+          <div class="how-step">
+            <div class="snum sn-o">2</div>
+            <div><div class="step-title">Stel jouw toon en voorkeuren in</div><div class="step-body">Omschrijf je schrijfstijl. OfficeFlow leert ook van je <strong>verstuurde mails.</strong></div></div>
+          </div>
+          <div class="how-step">
+            <div class="snum sn-o">3</div>
+            <div style="flex:1">
+              <div class="step-title">Open Gmail — alles staat klaar</div>
+              <div class="step-body">Elke mail gelabeld. Conceptreplies in je Drafts. <strong>Jij leest, past aan, verstuurt.</strong></div>
+              <div class="mini-visual">
+                <div class="mv-head"><div class="mv-dots"><span></span><span></span><span></span></div><div class="mv-title">Gmail · Jouw inbox</div></div>
+                <div class="mv-row"><span class="mv-name">Alex Kramer — Offerte aanvraag Q3</span><div style="display:flex;gap:4px;align-items:center"><span class="mv-lbl ml-r">TO RESPOND</span><span class="mv-ai">✦ CONCEPT</span></div></div>
+                <div class="mv-row"><span class="mv-name">Sara Jansen — Samenwerking voorstel</span><span class="mv-lbl ml-p">PRIORITY</span></div>
+                <div class="mv-row"><span class="mv-name">Mark Timmermans — Contract update</span><span class="mv-lbl ml-w">WAITING</span></div>
+                <div class="mv-row"><span class="mv-name">Newsletter · MarketingBlog</span><span class="mv-lbl ml-i">IGNORE</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="how-col reveal rd2">
+        <div class="how-col-head hch-b">
+          <div class="how-col-icon hci-b"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="7" width="20" height="14" rx="2" ry="2"></rect><path d="M16 21V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v16"></path></svg></div>
+          <div><div class="how-col-title">Facturen &amp; Offertes</div><div class="how-col-price">Facturen, offertes &amp; automatisering · Vanaf €19/mnd</div></div>
+        </div>
+        <div class="how-steps">
+          <div class="how-step">
+            <div class="snum sn-b">1</div>
+            <div><div class="step-title">Voeg klanten, offertes en abonnementen toe</div><div class="step-body">Klanten zijn het centrale ankerpunt. Abonnementen genereren automatisch <strong>terugkerende billable events.</strong></div></div>
+          </div>
+          <div class="how-step">
+            <div class="snum sn-b">2</div>
+            <div><div class="step-title">Werk en kosten worden facturen</div><div class="step-body">Worklogs en losse kosten stromen door naar factuurconcept. <strong>BTW en totalen bewaakt.</strong></div></div>
+          </div>
+          <div class="how-step">
+            <div class="snum sn-b">3</div>
+            <div style="flex:1">
+              <div class="step-title">Sync, verstuur en volg op</div>
+              <div class="step-body">Moneybird-sync, verzending en herinneringen via de <strong>operations cockpit.</strong></div>
+              <div class="mini-visual">
+                <div class="mv-head"><div class="mv-title">Operations Cockpit</div><span class="mv-count">3 acties</span></div>
+                <div class="mv-row"><span class="mv-name">#089 Bakker & Partners</span><span class="mv-amount">€4.250</span><span class="mv-lbl ml-beo">BEOORDELEN</span></div>
+                <div class="mv-row"><span class="mv-name">#087 Janssen Consulting</span><span class="mv-amount">€2.100</span><span class="mv-lbl ml-ver">VERSTUURD</span></div>
+                <div class="mv-row"><span class="mv-name">#085 Maas Solutions</span><span class="mv-amount">€3.600</span><span class="mv-lbl ml-bet">BETAALD</span></div>
+                <div class="mv-row"><span class="mv-name">#081 De Vries BV</span><span class="mv-amount">€1.800</span><span class="mv-lbl ml-her">HERINNERING</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="standalone-bar reveal">
+      <div class="sb-icon"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg></div>
+      <div class="sb-text"><strong>Beide producten zijn volledig zelfstandig.</strong> Ze delen geen data, geen login en geen workflow. Je kunt Mailbox Manager gebruiken zonder Facturen &amp; Offertes te activeren — en andersom. Er is geen technische of commerciële koppeling.</div>
+    </div>
+  </div>
+</section>
+
+<section id="waarom" class="why-bg">
+  <div class="wrap">
+    <div class="eyebrow ey-orange reveal">Onze aanpak</div>
+    <h2 class="reveal">Automatisering die<br>je vertrouwen geeft.</h2>
+    <div class="why-grid">
+      <div class="why-card reveal rd1">
+        <div class="why-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"></circle><path d="M19.07 4.93a10 10 0 0 1 0 14.14M4.93 4.93a10 10 0 0 0 0 14.14"></path></svg></div>
+        <div class="why-title">Nooit automatisch verstuurd</div>
+        <div class="why-body">AI bereidt voor. Jij besluit. Geen enkele reply of factuur gaat de deur uit zonder jouw goedkeuring.</div>
+      </div>
+      <div class="why-card reveal rd2">
+        <div class="why-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path><circle cx="12" cy="12" r="3"></circle></svg></div>
+        <div class="why-title">Altijd duidelijke volgende stap</div>
+        <div class="why-body">Het systeem vertelt je wat nu de logische actie is. Geen gissen, geen vergeten opvolgstap.</div>
+      </div>
+      <div class="why-card reveal rd3">
+        <div class="why-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><line x1="3" y1="9" x2="21" y2="9"></line><line x1="9" y1="21" x2="9" y2="9"></line></svg></div>
+        <div class="why-title">Rustige, overzichtelijke interface</div>
+        <div class="why-body">Geen rommelig dashboard. Een heldere werkruimte die rust geeft in plaats van stress.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="testi-bg">
+  <div class="wrap">
+    <div class="eyebrow ey-orange reveal">Ervaringen</div>
+    <h2 class="reveal">Wat gebruikers zeggen.</h2>
+  </div>
+  <div class="testi-carousel" aria-label="Gebruikerservaringen">
+    <div class="testi-track">
+      <!-- Set 1 -->
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Eerlijk, ik was sceptisch. Maar na twee weken merk ik dat ik gewoon sneller door m'n inbox ga. De concepten zitten vaker goed dan niet, en de toon klopt."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jordy Veenstra</div>
+        <div class="testi-role">Zelfstandig adviseur · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Van werkbon naar factuur naar Moneybird in één flow. Scheelt me echt een halve middag per week. Niet meer handmatig bonnetjes overtikken."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Merel de Jong</div>
+        <div class="testi-role">Kantoormanager · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Gebruik puur de Mailbox Manager. Doet wat het moet doen zonder poeha. Geen fancy AI-praatjes, gewoon een opgeruimde inbox."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Pim Broekhuis</div>
+        <div class="testi-role">Freelance developer · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Werkt prima voor standaard klantmails. Voor klachten of emotionele mails raadt de AI soms de verkeerde toon aan — dan pas ik hem zelf even aan. Verder zeer tevreden."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Wesley van Eijk</div>
+        <div class="testi-role">Salesmanager · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De Morning Briefing is waar ik elke dag mee start. Binnen een minuut weet ik wat er speelt. Geen mail meer doorspitten voor koffie."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Annemieke Smits</div>
+        <div class="testi-role">Operations · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Offertes die ik vroeger 's avonds nog zat te maken, tik ik nu in 3 minuten uit. Klanten reageren ook sneller — ziet er gewoon strak uit."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Dex van Leeuwen</div>
+        <div class="testi-role">Installateur · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Dat niks automatisch de deur uit gaat is voor mij het belangrijkst. Het stelt dingen voor, maar ik blijf aan de knoppen. Precies zoals ik het wil."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Lonneke Hoogendoorn</div>
+        <div class="testi-role">Ondernemer · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Op zich goed product, maar soms moet ik een concept nog flink aanpassen voor langere mails. Korte reacties gaan wel meteen goed. Leercurve, denk ik."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Floris Reijnders</div>
+        <div class="testi-role">Accountmanager · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Wat ik echt mis bij andere tools: herinneringen en betalingsopvolging die niet irritant zijn. Hier is het subtiel, en toch betalen klanten sneller."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Ricardo Korver</div>
+        <div class="testi-role">Boekhouder · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De belofte-detectie klinkt gimmicky maar is het niet. Ik zeg iets toe in een mail, en een dag later heb ik netjes een reminder. Dat alleen al is z'n geld waard."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Noa Tjepkema</div>
+        <div class="testi-role">Projectleider · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Prima tool, eerlijk. Onboarding kon iets sneller en ik moest even zoeken in de instellingen. Als het eenmaal draait werkt het zoals beloofd."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jelle Bakkers</div>
+        <div class="testi-role">Coach · Mailbox Manager</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Gebruik beide producten, maar apart. Prettig dat ze niet in elkaars vaarwater zitten. Twee losse tools, beide gewoon goed in wat ze doen."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jasmijn Pauwels</div>
+        <div class="testi-role">Zzp'er · Beide producten</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De Moneybird-sync is voor mij de killer feature. Uren loggen, factuur klik, staat meteen in m'n boekhouding. Geen dubbel werk meer."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Stijn Vermeulen</div>
+        <div class="testi-role">Aannemer · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Van werkbon tot factuur zonder tussenstappen. Ik houd eindelijk overzicht over wat wel en niet gefactureerd is — dat was bij mij altijd een puinhoop."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Nadia el Khatib</div>
+        <div class="testi-role">Zelfstandig tekstschrijver · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Werkt goed voor mijn abonnementen en losse offertes. Kleine opmerking: voor terugkerende klanten had ik graag meer templates gezien. Voor nu bouw ik ze zelf."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Bram Oosterhoff</div>
+        <div class="testi-role">Abonnementen · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Die BTW-bewaking heeft me al twee keer behoed voor een verkeerd tarief. Klein dingetje, maar scheelt echt gedoe achteraf met de boekhouder."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Yvonne Dragt</div>
+        <div class="testi-role">Administratie · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Eindelijk een tool die herinneringen stuurt zonder dat het als een schooiers-mail aanvoelt. Klanten betalen netjes, de relatie blijft goed."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Thijmen Kramer</div>
+        <div class="testi-role">Interim-manager · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Openstaande facturen in één oogopslag. Vroeger scrolde ik door m'n mailbox om te zien wat er nog binnen moest komen — nu zie ik het in 5 seconden."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Evelien Sprenger</div>
+        <div class="testi-role">Schildersbedrijf · Facturen &amp; Offertes</div>
+      </div>
+
+      <!-- Set 2 — duplicate for seamless loop, aria-hidden so screenreaders don't read twice -->
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Eerlijk, ik was sceptisch. Maar na twee weken merk ik dat ik gewoon sneller door m'n inbox ga. De concepten zitten vaker goed dan niet, en de toon klopt."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jordy Veenstra</div>
+        <div class="testi-role">Zelfstandig adviseur · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Van werkbon naar factuur naar Moneybird in één flow. Scheelt me echt een halve middag per week. Niet meer handmatig bonnetjes overtikken."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Merel de Jong</div>
+        <div class="testi-role">Kantoormanager · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Gebruik puur de Mailbox Manager. Doet wat het moet doen zonder poeha. Geen fancy AI-praatjes, gewoon een opgeruimde inbox."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Pim Broekhuis</div>
+        <div class="testi-role">Freelance developer · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Werkt prima voor standaard klantmails. Voor klachten of emotionele mails raadt de AI soms de verkeerde toon aan — dan pas ik hem zelf even aan. Verder zeer tevreden."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Wesley van Eijk</div>
+        <div class="testi-role">Salesmanager · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De Morning Briefing is waar ik elke dag mee start. Binnen een minuut weet ik wat er speelt. Geen mail meer doorspitten voor koffie."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Annemieke Smits</div>
+        <div class="testi-role">Operations · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Offertes die ik vroeger 's avonds nog zat te maken, tik ik nu in 3 minuten uit. Klanten reageren ook sneller — ziet er gewoon strak uit."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Dex van Leeuwen</div>
+        <div class="testi-role">Installateur · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Dat niks automatisch de deur uit gaat is voor mij het belangrijkst. Het stelt dingen voor, maar ik blijf aan de knoppen. Precies zoals ik het wil."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Lonneke Hoogendoorn</div>
+        <div class="testi-role">Ondernemer · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Op zich goed product, maar soms moet ik een concept nog flink aanpassen voor langere mails. Korte reacties gaan wel meteen goed. Leercurve, denk ik."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Floris Reijnders</div>
+        <div class="testi-role">Accountmanager · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Wat ik echt mis bij andere tools: herinneringen en betalingsopvolging die niet irritant zijn. Hier is het subtiel, en toch betalen klanten sneller."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Ricardo Korver</div>
+        <div class="testi-role">Boekhouder · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De belofte-detectie klinkt gimmicky maar is het niet. Ik zeg iets toe in een mail, en een dag later heb ik netjes een reminder. Dat alleen al is z'n geld waard."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Noa Tjepkema</div>
+        <div class="testi-role">Projectleider · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Prima tool, eerlijk. Onboarding kon iets sneller en ik moest even zoeken in de instellingen. Als het eenmaal draait werkt het zoals beloofd."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jelle Bakkers</div>
+        <div class="testi-role">Coach · Mailbox Manager</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Gebruik beide producten, maar apart. Prettig dat ze niet in elkaars vaarwater zitten. Twee losse tools, beide gewoon goed in wat ze doen."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Jasmijn Pauwels</div>
+        <div class="testi-role">Zzp'er · Beide producten</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"De Moneybird-sync is voor mij de killer feature. Uren loggen, factuur klik, staat meteen in m'n boekhouding. Geen dubbel werk meer."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Stijn Vermeulen</div>
+        <div class="testi-role">Aannemer · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Van werkbon tot factuur zonder tussenstappen. Ik houd eindelijk overzicht over wat wel en niet gefactureerd is — dat was bij mij altijd een puinhoop."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Nadia el Khatib</div>
+        <div class="testi-role">Zelfstandig tekstschrijver · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★<span class="star-dim">★</span></div>
+        <div class="testi-quote">"Werkt goed voor mijn abonnementen en losse offertes. Kleine opmerking: voor terugkerende klanten had ik graag meer templates gezien. Voor nu bouw ik ze zelf."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Bram Oosterhoff</div>
+        <div class="testi-role">Abonnementen · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Die BTW-bewaking heeft me al twee keer behoed voor een verkeerd tarief. Klein dingetje, maar scheelt echt gedoe achteraf met de boekhouder."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Yvonne Dragt</div>
+        <div class="testi-role">Administratie · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Eindelijk een tool die herinneringen stuurt zonder dat het als een schooiers-mail aanvoelt. Klanten betalen netjes, de relatie blijft goed."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Thijmen Kramer</div>
+        <div class="testi-role">Interim-manager · Facturen &amp; Offertes</div>
+      </div>
+      <div class="testi-card" aria-hidden="true">
+        <div class="testi-stars">★★★★★</div>
+        <div class="testi-quote">"Openstaande facturen in één oogopslag. Vroeger scrolde ik door m'n mailbox om te zien wat er nog binnen moest komen — nu zie ik het in 5 seconden."</div>
+        <div class="testi-sep"></div>
+        <div class="testi-name">Evelien Sprenger</div>
+        <div class="testi-role">Schildersbedrijf · Facturen &amp; Offertes</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="faq" class="faq-bg">
+  <div class="wrap">
+    <div class="faq-wrap">
+      <div class="faq-head reveal">
+        <div class="eyebrow">Veelgestelde vragen</div>
+        <h2>Nog twijfel? Hier zijn de antwoorden.</h2>
+      </div>
+
+      <div class="faq-list">
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Kan ik maandelijks opzeggen?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Ja. Beide producten zijn maandelijks opzegbaar, zonder opzegtermijn of verborgen kosten.
+            Je betaalt de lopende maand af en daarna stopt het abonnement automatisch.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Verstuurt OfficeFlow automatisch mails?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Nee — en dat is expres. Mailbox Manager maakt <strong>alleen concepten</strong> aan in je Gmail.
+            Jij bepaalt altijd zelf of en wanneer een bericht verstuurd wordt. Geen auto-send, geen auto-archive.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Werkt het ook met Outlook of Microsoft 365?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Op dit moment ondersteunt Mailbox Manager alleen <strong>Gmail</strong>.
+            Outlook / Microsoft 365-ondersteuning staat op de roadmap en volgt zodra de Gmail-flow volledig stabiel is.
+            Facturen &amp; Offertes werkt los van je mailprovider.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Kan ik OfficeFlow gebruiken in Apple Mail, Outlook of Thunderbird?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Nee — gebruik <strong>Gmail zelf</strong>: <a href="https://mail.google.com" target="_blank" rel="noopener">mail.google.com</a> op je computer of de officiële Gmail-app op je telefoon.
+            OfficeFlow plaatst AI-concepten direct in de Gmail-thread, zodat je ze met één klik op <em>Verzenden</em> kunt versturen.
+            In Apple Mail, Outlook of Thunderbird (IMAP) tonen onze labels geen kleuren en kun je concepten niet netjes vanuit de thread versturen — daar werkt de workflow dus niet zoals bedoeld.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Wat gebeurt er met mijn data?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Je Gmail-data wordt alleen gebruikt om mails te classificeren en concepten in jouw stijl te genereren.
+            We verkopen niets, trainen geen generieke modellen op jouw data en houden ons aan het Google API Services User Data Policy.
+            Zie het <a href="privacy.html">privacybeleid</a> voor de volledige uitleg.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Heb ik beide producten nodig?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Nee. Mailbox Manager en Facturen &amp; Offertes zijn volledig losse producten.
+            Ze delen geen data en je kunt er één afnemen zonder de ander. Kies wat jouw bedrijf nu het meeste oplevert.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Zijn de prijzen inclusief btw?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Nee, de genoemde prijzen zijn <strong>excl. btw</strong>. Mailbox Manager is €24/mnd.
+            Facturen &amp; Offertes start vanaf €19/mnd en loopt op tot €89/mnd afhankelijk van je volume. Betaling loopt via Stripe.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Hoe lang duurt de setup?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Mailbox Manager koppel je in zo'n 2 minuten via Google OAuth. Daarna loopt de classificatie en draft-generatie op de achtergrond.
+            Facturen &amp; Offertes zet je op via onboarding met je bedrijfsgegevens en optionele Moneybird-koppeling.
+          </div>
+        </details>
+
+        <details class="faq-item reveal">
+          <summary>
+            <span>Waarom is Mailbox Manager nu beperkt beschikbaar?</span>
+            <span class="faq-icon" aria-hidden="true">+</span>
+          </summary>
+          <div class="faq-answer">
+            Omdat Mailbox Manager met Gmail-data werkt, loopt er op dit moment een <strong>Google-verificatie</strong>.
+            Gedurende die periode is toegang tijdelijk beperkt tot goedgekeurde testers.
+            Meld je gerust aan — zodra de verificatie rond is ontvang je bericht.
+          </div>
+        </details>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="cta-bg">
+  <div class="wrap">
+    <div class="cta-inner">
+      <div class="eyebrow ey-light" style="justify-content:center;">Start vandaag</div>
+      <h2>Welke tool heeft<br>jouw bedrijf nodig?</h2>
+      <p>Twee losse producten. Geen verplichte koppeling. Start met wat nu het meeste oplevert.</p>
+      <div class="cta-btns">
+        <a class="btn btn-orange btn-lg" href="/onboarding.html">Mailbox Manager — €24/mnd</a>
+        <a class="btn btn-blue btn-lg" href="/facturen/">Facturen &amp; Offertes — Vanaf €19</a>
+      </div>
+      <div style="margin-top:14px; font-size:12.5px; color:rgba(255,255,255,.75);">
+        ⚠ Mailbox Manager wordt momenteel geverifieerd door Google — tijdelijk beperkt beschikbaar.
+      </div>
+      <div class="cta-fine">
+        <span>Beide maandelijks opzegbaar</span><span>·</span>
+        <span>Geen verplichte koppeling</span><span>·</span>
+        <span>Nooit auto-send</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <div class="footer-grid">
+      <div>
+        <div class="footer-logo"><span class="footer-logo-text">Office<span class="flow">Flow</span></span></div>
+        <div class="footer-desc">Twee zelfstandige tools voor slimme werkprocessen. Mailbox automatisering én professionele facturatie — elk een specialist in zijn eigen domein.</div>
+      </div>
+      <div>
+        <div class="footer-col-title">Producten</div>
+        <div class="footer-links">
+          <a href="/onboarding.html">Mailbox Manager</a>
+          <a href="/facturen/">Facturen &amp; Offertes</a>
+        </div>
+      </div>
+      <div>
+        <div class="footer-col-title">Bedrijf</div>
+        <div class="footer-links">
+          <a href="privacy.html">Privacybeleid</a>
+          <a href="terms.html">Algemene voorwaarden</a>
+          <a href="mailto:mail@officeflowcompany.com">Contact</a>
+        </div>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <div class="footer-copy">© 2026 OfficeFlow · mail@officeflowcompany.com · KVK 42041799</div>
+      <div class="footer-copy">Automatisch waar het slim is. Controle waar het telt.</div>
+    </div>
+  </div>
+</footer>
+
+<script>
+  const obs = new IntersectionObserver(
+    es => es.forEach(e => { if (e.isIntersecting) { e.target.classList.add('in'); obs.unobserve(e.target); } }),
+    { threshold: 0.1, rootMargin: '0px 0px -40px 0px' }
+  );
+  document.querySelectorAll('.reveal').forEach(el => obs.observe(el));
+</script>
+</body>
+</html>
