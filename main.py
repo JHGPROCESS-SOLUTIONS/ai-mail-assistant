@@ -3741,17 +3741,15 @@ async def supabase_upsert_commitment(
     """Inserts or updates an active commitment for this thread."""
     try:
         # Check if an active commitment already exists for this thread
-        existing = await supabase_rest_request(
-            "GET",
+        existing = await supabase_get(
             f"/rest/v1/commitments?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active&select=*",
         )
         if existing and len(existing) > 0:
             # Update existing
             commitment_id = existing[0]["id"]
-            updated = await supabase_rest_request(
-                "PATCH",
+            updated = await supabase_patch(
                 f"/rest/v1/commitments?id=eq.{commitment_id}",
-                json={
+                {
                     "action_text": action_text,
                     "due_date": due_date,
                     "recipient_email": recipient_email,
@@ -3765,10 +3763,9 @@ async def supabase_upsert_commitment(
             return updated[0] if isinstance(updated, list) and updated else existing[0]
 
         # Insert new
-        inserted = await supabase_rest_request(
-            "POST",
+        inserted = await supabase_post(
             "/rest/v1/commitments",
-            json={
+            {
                 "user_id": user_id,
                 "mailbox_id": mailbox_id,
                 "gmail_thread_id": gmail_thread_id,
@@ -3792,10 +3789,9 @@ async def supabase_complete_commitments_for_thread(gmail_thread_id: str) -> int:
     """Marks active commitments for this thread as completed (used when a reply arrives)."""
     try:
         now_iso = _dt.now(_tz.utc).isoformat()
-        await supabase_rest_request(
-            "PATCH",
+        await supabase_patch(
             f"/rest/v1/commitments?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active",
-            json={"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
+            {"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
         )
         return 1
     except Exception as exc:
@@ -3867,8 +3863,7 @@ async def process_sent_mail_for_commitment(
 
 async def get_mailbox_briefing_config(mailbox_id: str) -> dict[str, Any]:
     try:
-        rows = await supabase_rest_request(
-            "GET",
+        rows = await supabase_get(
             f"/rest/v1/mailboxes?id=eq.{mailbox_id}&select=briefing_enabled,briefing_hour,briefing_minute,briefing_timezone,briefing_last_sent_at,email_address",
         )
         return rows[0] if rows else {}
@@ -3902,8 +3897,7 @@ async def get_upcoming_commitments(user_id: str, days_ahead: int = 7) -> list[di
     try:
         today = _date.today().isoformat()
         cutoff = (_date.today() + _td(days=days_ahead)).isoformat()
-        rows = await supabase_rest_request(
-            "GET",
+        rows = await supabase_get(
             f"/rest/v1/commitments?user_id=eq.{user_id}&status=eq.active&due_date=lte.{cutoff}&order=due_date.asc&select=*",
         )
         return rows or []
@@ -4127,10 +4121,9 @@ async def send_briefing_for_mailbox(email: str) -> dict[str, Any]:
 
     # Update briefing_last_sent_at
     try:
-        await supabase_rest_request(
-            "PATCH",
+        await supabase_patch(
             f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
-            json={"briefing_last_sent_at": _dt.now(_tz.utc).isoformat()},
+            {"briefing_last_sent_at": _dt.now(_tz.utc).isoformat()},
         )
     except Exception:
         pass
@@ -4291,8 +4284,7 @@ async def get_relationship_for_contact(user_id: str, contact_email: str) -> dict
 
     # Commitments for this contact
     try:
-        commitments = await supabase_rest_request(
-            "GET",
+        commitments = await supabase_get(
             f"/rest/v1/commitments?user_id=eq.{user_id}&recipient_email=eq.{contact_email}&status=eq.active&order=due_date.asc&select=*",
         )
     except Exception:
@@ -4345,8 +4337,7 @@ async def http_list_commitments(email: str, status: str = "active"):
     user = context["user"]
     if status not in ("active", "completed", "cancelled"):
         raise HTTPException(status_code=400, detail="status must be active / completed / cancelled")
-    rows = await supabase_rest_request(
-        "GET",
+    rows = await supabase_get(
         f"/rest/v1/commitments?user_id=eq.{user['id']}&status=eq.{status}&order=due_date.asc&select=*",
     )
     return {"commitments": rows or []}
@@ -4357,10 +4348,9 @@ async def http_complete_commitment(commitment_id: str, email: str = Body(...)):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
     now_iso = _dt.now(_tz.utc).isoformat()
-    updated = await supabase_rest_request(
-        "PATCH",
+    updated = await supabase_patch(
         f"/rest/v1/commitments?id=eq.{commitment_id}&user_id=eq.{user['id']}",
-        json={"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
+        {"status": "completed", "completed_at": now_iso, "updated_at": now_iso},
         prefer="return=representation",
     )
     return {"status": "ok", "commitment": updated[0] if isinstance(updated, list) and updated else None}
@@ -4396,10 +4386,9 @@ async def http_briefing_settings(
         patch["briefing_timezone"] = timezone_name
     if not patch:
         return {"status": "noop"}
-    updated = await supabase_rest_request(
-        "PATCH",
+    updated = await supabase_patch(
         f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
-        json=patch,
+        patch,
         prefer="return=representation",
     )
     return {"status": "ok", "mailbox": updated[0] if isinstance(updated, list) and updated else None}
