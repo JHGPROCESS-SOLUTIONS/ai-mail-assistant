@@ -2042,6 +2042,17 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
 async def classify_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
+    # Safeguard: lege body -> niet classificeren, FYI als veilig default
+    if not body_text or len(body_text.strip()) < 10:
+        return {
+            "label": "FYI",
+            "reason": "Body text too short or empty to classify",
+            "generate_draft": False,
+        }
+
+    # Trunc body voor classifier (full body wordt alleen bij draft gebruikt)
+    body_for_prompt = (body_text or "")[:3000]
+
     prompt = f"""
 Je bent een e-mail classifier voor OfficeFlow.
 
@@ -2054,12 +2065,16 @@ Kies exact 1 label uit deze lijst:
 - Ignore
 
 Regels:
-- Priority: belangrijke mail met urgentie, klantwaarde, deadline of directe business impact
-- To Respond: normale mail waar een antwoord op nodig is
-- FYI: informatief, geen antwoord nodig
-- Notification: automatische melding, statusupdate, systeemmail
-- Marketing: nieuwsbrief, promotie, sales outreach, aanbieding
-- Ignore: irrelevant, ongewenst, rommel of duidelijk lage kwaliteit
+- Priority: ALLEEN bij duidelijke urgentie of directe business impact. Bijvoorbeeld: harde deadline binnen 24-48 uur, klant met klacht of blokkerend probleem, spoedopdracht, uitval, verlies van omzet. Een normale klantmail is GEEN Priority.
+- To Respond: mail waar de gebruiker inhoudelijk op moet antwoorden. Dit is de standaard voor normale klant- en zakelijke mails zonder acute urgentie.
+- FYI: informatief, geen reactie nodig, maar wel relevant genoeg om te lezen.
+- Notification: automatische systeemmelding, statusupdate, bevestiging, receipt, log.
+- Marketing: nieuwsbrief, promotie, sales outreach, cold outreach, aanbieding.
+- Ignore: duidelijk irrelevant, lage kwaliteit, scraper, phishing-achtig, of rommel.
+
+Belangrijk:
+- Bij twijfel tussen Priority en To Respond -> kies To Respond.
+- Bij twijfel tussen Marketing en Ignore -> kies Marketing (veiliger voor gebruiker).
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
@@ -2071,47 +2086,70 @@ Van: {sender}
 Onderwerp: {subject}
 
 E-mail:
-{body_text}
+{body_for_prompt}
 """.strip()
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Je classificeert zakelijke e-mails en geeft alleen geldige JSON terug.",
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                "temperature": 0,
-            },
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Je classificeert zakelijke e-mails en geeft alleen geldige JSON terug.",
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    "temperature": 0,
+                },
+            )
+    except Exception as exc:
+        print(f"[classify_email] OpenAI call failed: {repr(exc)} -- falling back to 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier unavailable: {type(exc).__name__}",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     data = parse_response_data(response)
     if response.status_code >= 400:
-        raise HTTPException(status_code=500, detail=f"OpenAI classify error: {data}")
+        print(f"[classify_email] OpenAI {response.status_code}: {data} -- falling back to 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier HTTP {response.status_code}",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     try:
         content = data["choices"][0]["message"]["content"]
         parsed = safe_parse_json(content)
     except Exception:
-        raise HTTPException(status_code=500, detail=f"Invalid classifier response: {data}")
+        print(f"[classify_email] Invalid response shape: {data} -- falling back to 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": "Classifier returned invalid JSON",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     label = parsed.get("label")
-    reason = parsed.get("reason")
+    reason = parsed.get("reason") or "No reason given"
 
     if label not in CLASSIFIER_LABELS:
-        raise HTTPException(status_code=500, detail=f"Classifier returned invalid label: {label}")
+        print(f"[classify_email] Unknown label '{label}' -- falling back to 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier returned unknown label '{label}'",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     return {
         "label": label,
@@ -2122,6 +2160,16 @@ E-mail:
 
 async def classify_follow_up_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    # Safeguard: lege body -> niet classificeren, FYI als veilig default
+    if not body_text or len(body_text.strip()) < 10:
+        return {
+            "label": "FYI",
+            "reason": "Body text too short or empty to classify",
+            "generate_draft": False,
+        }
+
+    body_for_prompt = (body_text or "")[:3000]
 
     prompt = f"""
 Je bent een e-mail classifier voor OfficeFlow.
@@ -2154,6 +2202,7 @@ Belangrijke voorkeur:
 - Als het laatste inkomende bericht dingen zegt als "bedankt", "duidelijk", "meer hoef ik niet te weten", "helemaal goed", "is prima", "alles is geregeld", kies dan Done.
 - Kies alleen To Respond als de gebruiker nu echt weer iets moet doen.
 - Kies Waiting On Reply alleen als het gesprek nog open voelt maar niet echt klaar is.
+- Bij twijfel tussen To Respond en een andere label -> kies To Respond.
 
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
@@ -2165,47 +2214,70 @@ Van: {sender}
 Onderwerp: {subject}
 
 E-mail:
-{body_text}
+{body_for_prompt}
 """.strip()
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "Je classificeert vervolgberichten in bestaande e-mailthreads en geeft alleen geldige JSON terug.",
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                "temperature": 0,
-            },
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": "Je classificeert vervolgberichten in bestaande e-mailthreads en geeft alleen geldige JSON terug.",
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    "temperature": 0,
+                },
+            )
+    except Exception as exc:
+        print(f"[classify_follow_up_email] OpenAI call failed: {repr(exc)} -- fallback 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier unavailable: {type(exc).__name__}",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     data = parse_response_data(response)
     if response.status_code >= 400:
-        raise HTTPException(status_code=500, detail=f"OpenAI follow-up classify error: {data}")
+        print(f"[classify_follow_up_email] OpenAI {response.status_code}: {data} -- fallback 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier HTTP {response.status_code}",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     try:
         content = data["choices"][0]["message"]["content"]
         parsed = safe_parse_json(content)
     except Exception:
-        raise HTTPException(status_code=500, detail=f"Invalid follow-up classifier response: {data}")
+        print(f"[classify_follow_up_email] Invalid response shape: {data} -- fallback 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": "Classifier returned invalid JSON",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     label = parsed.get("label")
-    reason = parsed.get("reason")
+    reason = parsed.get("reason") or "No reason given"
 
     if label not in FOLLOW_UP_CLASSIFIER_LABELS:
-        raise HTTPException(status_code=500, detail=f"Follow-up classifier returned invalid label: {label}")
+        print(f"[classify_follow_up_email] Unknown label '{label}' -- fallback 'To Respond'")
+        return {
+            "label": "To Respond",
+            "reason": f"Classifier returned unknown label '{label}'",
+            "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+        }
 
     return {
         "label": label,
@@ -2216,6 +2288,16 @@ E-mail:
 
 async def classify_latest_sent_reply_status(subject: str | None, body_text: str | None) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    # Safeguard: lege body -> thread conservatief op Waiting On Reply zetten
+    if not body_text or len(body_text.strip()) < 10:
+        return {
+            "label": "Waiting On Reply",
+            "reason": "Sent body too short or empty to classify",
+            "generate_draft": False,
+        }
+
+    body_for_prompt = (body_text or "")[:3000]
 
     prompt = f"""
 Je bent een e-mail classifier voor OfficeFlow.
@@ -2296,52 +2378,75 @@ Geef alleen geldige JSON terug in exact dit formaat:
 Onderwerp: {subject}
 
 Laatste verzonden bericht:
-{body_text}
+{body_for_prompt}
 """.strip()
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "Je bepaalt de juiste threadstatus na een echt verzonden reply. "
-                            "Je bent streng met Done. "
-                            "Je kiest alleen Done als de thread echt volledig afgerond is. "
-                            "Je geeft alleen geldige JSON terug."
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                "temperature": 0,
-            },
-        )
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "Je bepaalt de juiste threadstatus na een echt verzonden reply. "
+                                "Je bent streng met Done. "
+                                "Je kiest alleen Done als de thread echt volledig afgerond is. "
+                                "Je geeft alleen geldige JSON terug."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt,
+                        },
+                    ],
+                    "temperature": 0,
+                },
+            )
+    except Exception as exc:
+        print(f"[classify_sent_reply] OpenAI call failed: {repr(exc)} -- fallback 'Waiting On Reply'")
+        return {
+            "label": "Waiting On Reply",
+            "reason": f"Classifier unavailable: {type(exc).__name__}",
+            "generate_draft": False,
+        }
 
     data = parse_response_data(response)
     if response.status_code >= 400:
-        raise HTTPException(status_code=500, detail=f"OpenAI sent-reply classify error: {data}")
+        print(f"[classify_sent_reply] OpenAI {response.status_code}: {data} -- fallback 'Waiting On Reply'")
+        return {
+            "label": "Waiting On Reply",
+            "reason": f"Classifier HTTP {response.status_code}",
+            "generate_draft": False,
+        }
 
     try:
         content = data["choices"][0]["message"]["content"]
         parsed = safe_parse_json(content)
     except Exception:
-        raise HTTPException(status_code=500, detail=f"Invalid sent-reply classifier response: {data}")
+        print(f"[classify_sent_reply] Invalid response shape: {data} -- fallback 'Waiting On Reply'")
+        return {
+            "label": "Waiting On Reply",
+            "reason": "Classifier returned invalid JSON",
+            "generate_draft": False,
+        }
 
     label = parsed.get("label")
-    reason = parsed.get("reason")
+    reason = parsed.get("reason") or "No reason given"
 
     if label not in SENT_REPLY_STATUS_LABELS:
-        raise HTTPException(status_code=500, detail=f"Sent-reply classifier returned invalid label: {label}")
+        print(f"[classify_sent_reply] Unknown label '{label}' -- fallback 'Waiting On Reply'")
+        return {
+            "label": "Waiting On Reply",
+            "reason": f"Classifier returned unknown label '{label}'",
+            "generate_draft": False,
+        }
 
     return {
         "label": label,
@@ -2667,108 +2772,112 @@ async def process_open_to_respond_threads(
         if not message_id:
             continue
 
-        message_data = await gmail_get_json_for_user(
-            user_id=user_id,
-            url=f"{GMAIL_API_BASE}/messages/{message_id}",
-        )
-
-        thread_id = message_data.get("threadId")
-        if not thread_id or thread_id in processed_thread_ids:
-            continue
-
-        processed_thread_ids.add(thread_id)
-
-        current_label_ids = set(message_data.get("labelIds", []))
-        if not any(lid in current_label_ids for lid in label_ids_to_scan):
-            continue
-
-        thread_reply_state = await get_thread_reply_state(
-            user_id=user_id,
-            thread_id=thread_id,
-            mailbox_email=mailbox_email,
-        )
-
-        latest_user_message = thread_reply_state.get("latest_user_message")
-        has_open_draft = thread_reply_state.get("has_open_draft", False)
-
-        if not latest_user_message or has_open_draft:
-            continue
-
-        if not thread_reply_state["user_is_latest_sender"]:
-            continue
-
-        latest_user_payload = latest_user_message.get("payload", {})
-        latest_user_headers = latest_user_payload.get("headers", [])
-        latest_user_subject = get_header_value(latest_user_headers, "Subject")
-        latest_user_body_text = extract_plain_text_from_payload(latest_user_payload)
-
-        sent_status = await classify_latest_sent_reply_status(
-            subject=latest_user_subject,
-            body_text=latest_user_body_text,
-        )
-        target_label = sent_status["label"]
-
-        updated_label_ids = await sync_thread_status(
-            user_id=user_id,
-            thread_id=thread_id,
-            current_message_id=message_id,
-            current_label_ids=current_label_ids,
-            label_name_to_id=label_name_to_id,
-            target_label_name=target_label,
-        )
-
-        # --- FOLLOW-UP RADAR: detect commitments in this just-sent mail ---
-        commitment_info = {"detected": False, "forced_follow_up": False}
         try:
-            to_header = get_header_value(latest_user_headers, "To") or ""
-            recipient_email = None
-            recipient_name = None
-            if to_header:
-                import re as _re_cm
-                m = _re_cm.match(r'^\s*(?:"?([^"<]+?)"?\s*)?<?([^<>\s]+@[^<>\s]+)>?\s*$', to_header)
-                if m:
-                    recipient_name = (m.group(1) or "").strip() or None
-                    recipient_email = (m.group(2) or "").strip().lower() or None
-
-            sent_at_iso = None
-            try:
-                internal_ts = int(latest_user_message.get("internalDate", "0"))
-                if internal_ts:
-                    sent_at_iso = datetime.fromtimestamp(internal_ts / 1000, tz=timezone.utc).isoformat()
-            except Exception:
-                pass
-
-            commitment_info = await process_sent_mail_for_commitment(
+            message_data = await gmail_get_json_for_user(
                 user_id=user_id,
-                mailbox_id=mailbox_id,
+                url=f"{GMAIL_API_BASE}/messages/{message_id}",
+            )
+
+            thread_id = message_data.get("threadId")
+            if not thread_id or thread_id in processed_thread_ids:
+                continue
+
+            processed_thread_ids.add(thread_id)
+
+            current_label_ids = set(message_data.get("labelIds", []))
+            if not any(lid in current_label_ids for lid in label_ids_to_scan):
+                continue
+
+            thread_reply_state = await get_thread_reply_state(
+                user_id=user_id,
                 thread_id=thread_id,
-                message_id=message_id,
+                mailbox_email=mailbox_email,
+            )
+
+            latest_user_message = thread_reply_state.get("latest_user_message")
+            has_open_draft = thread_reply_state.get("has_open_draft", False)
+
+            if not latest_user_message or has_open_draft:
+                continue
+
+            if not thread_reply_state["user_is_latest_sender"]:
+                continue
+
+            latest_user_payload = latest_user_message.get("payload", {})
+            latest_user_headers = latest_user_payload.get("headers", [])
+            latest_user_subject = get_header_value(latest_user_headers, "Subject")
+            latest_user_body_text = extract_plain_text_from_payload(latest_user_payload)
+
+            sent_status = await classify_latest_sent_reply_status(
                 subject=latest_user_subject,
                 body_text=latest_user_body_text,
-                recipient_email=recipient_email,
-                recipient_name=recipient_name,
-                sent_at_iso=sent_at_iso,
-                label_name_to_id=label_name_to_id,
-                current_label_ids=set(updated_label_ids),
             )
-            if commitment_info.get("forced_follow_up"):
-                target_label = "Follow Up"
-        except Exception as exc:
-            print(f"[commitment-hook] Failed for thread {thread_id}: {repr(exc)}")
+            target_label = sent_status["label"]
 
-        results.append(
-            {
-                "gmail_message_id": message_id,
-                "gmail_thread_id": thread_id,
-                "label": target_label,
-                "classification_reason": sent_status["reason"],
-                "draft_created": False,
-                "gmail_draft_id": None,
-                "label_ids": list(updated_label_ids),
-                "thread_status": "updated_after_sent_reply",
-                "commitment_detected": commitment_info.get("detected", False),
-            }
-        )
+            updated_label_ids = await sync_thread_status(
+                user_id=user_id,
+                thread_id=thread_id,
+                current_message_id=message_id,
+                current_label_ids=current_label_ids,
+                label_name_to_id=label_name_to_id,
+                target_label_name=target_label,
+            )
+
+            # --- FOLLOW-UP RADAR: detect commitments in this just-sent mail ---
+            commitment_info = {"detected": False, "forced_follow_up": False}
+            try:
+                to_header = get_header_value(latest_user_headers, "To") or ""
+                recipient_email = None
+                recipient_name = None
+                if to_header:
+                    import re as _re_cm
+                    m = _re_cm.match(r'^\s*(?:"?([^"<]+?)"?\s*)?<?([^<>\s]+@[^<>\s]+)>?\s*$', to_header)
+                    if m:
+                        recipient_name = (m.group(1) or "").strip() or None
+                        recipient_email = (m.group(2) or "").strip().lower() or None
+
+                sent_at_iso = None
+                try:
+                    internal_ts = int(latest_user_message.get("internalDate", "0"))
+                    if internal_ts:
+                        sent_at_iso = datetime.fromtimestamp(internal_ts / 1000, tz=timezone.utc).isoformat()
+                except Exception:
+                    pass
+
+                commitment_info = await process_sent_mail_for_commitment(
+                    user_id=user_id,
+                    mailbox_id=mailbox_id,
+                    thread_id=thread_id,
+                    message_id=message_id,
+                    subject=latest_user_subject,
+                    body_text=latest_user_body_text,
+                    recipient_email=recipient_email,
+                    recipient_name=recipient_name,
+                    sent_at_iso=sent_at_iso,
+                    label_name_to_id=label_name_to_id,
+                    current_label_ids=set(updated_label_ids),
+                )
+                if commitment_info.get("forced_follow_up"):
+                    target_label = "Follow Up"
+            except Exception as exc:
+                print(f"[commitment-hook] Failed for thread {thread_id}: {repr(exc)}")
+
+            results.append(
+                {
+                    "gmail_message_id": message_id,
+                    "gmail_thread_id": thread_id,
+                    "label": target_label,
+                    "classification_reason": sent_status["reason"],
+                    "draft_created": False,
+                    "gmail_draft_id": None,
+                    "label_ids": list(updated_label_ids),
+                    "thread_status": "updated_after_sent_reply",
+                    "commitment_detected": commitment_info.get("detected", False),
+                }
+            )
+        except Exception as exc:
+            print(f"[open-to-respond] Thread {message_id} failed: {repr(exc)}")
+            continue
 
     return results
 
@@ -2922,48 +3031,55 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
         draft_created = False
         gmail_draft_id = None
+        draft_error: str | None = None
 
         if should_generate_draft and email_row and not existing_drafts:
-            ai_reply = await generate_ai_reply(
-                user_id=user["id"],
-                subject=subject,
-                sender=from_header,
-                body_text=body_text,
-            )
-
-            to_email = extract_email_address(from_header)
-
-            if to_email and ai_reply:
-                draft_result = await create_gmail_threaded_draft(
+            try:
+                ai_reply = await generate_ai_reply(
                     user_id=user["id"],
-                    to_email=to_email,
                     subject=subject,
-                    body=ai_reply,
-                    thread_id=thread_id,
-                    original_message_id_header=original_message_id_header,
-                    references_header=references_header,
+                    sender=from_header,
+                    body_text=body_text,
                 )
 
-                gmail_draft_id = draft_result.get("id")
+                to_email = extract_email_address(from_header)
 
-                if gmail_draft_id:
-                    await supabase_insert_draft(
+                if to_email and ai_reply:
+                    draft_result = await create_gmail_threaded_draft(
                         user_id=user["id"],
-                        email_id=email_row["id"],
-                        gmail_draft_id=gmail_draft_id,
+                        to_email=to_email,
                         subject=subject,
-                        draft_body=ai_reply,
-                        status="generated",
+                        body=ai_reply,
+                        thread_id=thread_id,
+                        original_message_id_header=original_message_id_header,
+                        references_header=references_header,
                     )
-                    draft_created = True
 
-                    await supabase_upsert_onboarding_state(
-                        user_id=user["id"],
-                        gmail_connected=True,
-                        profile_completed=True,
-                        initial_sync_completed=False,
-                        first_draft_generated=True,
-                    )
+                    gmail_draft_id = draft_result.get("id")
+
+                    if gmail_draft_id:
+                        await supabase_insert_draft(
+                            user_id=user["id"],
+                            email_id=email_row["id"],
+                            gmail_draft_id=gmail_draft_id,
+                            subject=subject,
+                            draft_body=ai_reply,
+                            status="generated",
+                        )
+                        draft_created = True
+
+                        await supabase_upsert_onboarding_state(
+                            user_id=user["id"],
+                            gmail_connected=True,
+                            profile_completed=True,
+                            initial_sync_completed=False,
+                            first_draft_generated=True,
+                        )
+            except Exception as exc:
+                draft_error = f"{type(exc).__name__}: {str(exc)[:200]}"
+                print(f"[draft-generation] Failed for message {message_id}: {repr(exc)}")
+                # Mail blijft gelabeld. Volgende auto-process run probeert opnieuw
+                # omdat existing_drafts nog steeds leeg is.
 
         results.append(
             {
@@ -2980,6 +3096,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "classification_reason": classification_reason,
                 "draft_created": draft_created,
                 "gmail_draft_id": gmail_draft_id,
+                "draft_error": draft_error,
                 "already_had_label": has_any_custom_label,
                 "thread_status": thread_status,
                 "has_open_draft": has_open_draft,
