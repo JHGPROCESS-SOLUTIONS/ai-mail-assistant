@@ -393,6 +393,60 @@
     .btn-danger-solid:hover { background: #b91c1c; }
     .btn-danger-solid:disabled { opacity: .6; }
 
+    /* ============ WELCOME MODAL (first-run wow) ============ */
+    .welcome-modal {
+      max-width: 520px;
+      padding: 36px 32px 28px;
+      text-align: center;
+    }
+    .welcome-spark {
+      width: 56px; height: 56px; border-radius: 50%;
+      background: linear-gradient(135deg, #fff4ec 0%, #ffe1cc 100%);
+      display: flex; align-items: center; justify-content: center;
+      margin: 0 auto 14px; font-size: 28px;
+    }
+    .welcome-title {
+      font-size: 24px; font-weight: 700; margin: 0 0 8px;
+      color: var(--text-1);
+    }
+    .welcome-sub {
+      font-size: 14.5px; color: var(--text-2); line-height: 1.55;
+      margin: 0 auto 22px; max-width: 380px;
+    }
+    .welcome-grid {
+      display: grid; grid-template-columns: repeat(3, 1fr);
+      gap: 10px; margin-bottom: 22px;
+    }
+    .welcome-stat {
+      background: var(--bg-soft);
+      border: 1.5px solid var(--border-soft);
+      border-radius: 14px; padding: 16px 10px;
+    }
+    .welcome-stat .ws-value {
+      font-size: 26px; font-weight: 700; color: var(--text-1);
+      line-height: 1.1;
+      font-variant-numeric: tabular-nums;
+    }
+    .welcome-stat .ws-label {
+      font-size: 11.5px; color: var(--text-2); margin-top: 6px;
+      font-weight: 500; text-transform: uppercase; letter-spacing: .04em;
+    }
+    .welcome-stat.ws-orange .ws-value { color: var(--orange); }
+    .welcome-stat.ws-green  .ws-value { color: var(--green); }
+    .welcome-stat.ws-blue   .ws-value { color: #2563eb; }
+    .welcome-cta {
+      display: inline-block; padding: 12px 22px;
+      background: var(--orange); color: #fff;
+      border: none; border-radius: 10px;
+      font-size: 14.5px; font-weight: 600; cursor: pointer;
+      font-family: inherit;
+    }
+    .welcome-cta:hover { background: #ea6a1e; }
+    @media (max-width: 520px) {
+      .welcome-grid { grid-template-columns: 1fr; }
+      .welcome-stat { padding: 14px 12px; }
+    }
+
     .loading { text-align: center; padding: 80px 20px; color: var(--text-2); }
 
     /* ============ RESPONSIVE ============ */
@@ -1185,6 +1239,32 @@
     </div>
   </div>
 
+  <!-- FIRST-RUN WELCOME MODAL -->
+  <div class="modal-overlay" id="welcome-modal" hidden>
+    <div class="modal welcome-modal">
+      <div class="welcome-spark">✨</div>
+      <h3 class="welcome-title" id="welcome-headline">Welkom bij OfficeFlow</h3>
+      <p class="welcome-sub" id="welcome-sub">
+        Terwijl jij aan het instellen was, is OfficeFlow al aan de slag gegaan met jouw inbox.
+      </p>
+      <div class="welcome-grid">
+        <div class="welcome-stat ws-orange">
+          <div class="ws-value" id="wc-emails">0</div>
+          <div class="ws-label">E-mails gescand</div>
+        </div>
+        <div class="welcome-stat ws-green">
+          <div class="ws-value" id="wc-drafts">0</div>
+          <div class="ws-label">Concepten klaar</div>
+        </div>
+        <div class="welcome-stat ws-blue">
+          <div class="ws-value" id="wc-time">0s</div>
+          <div class="ws-label">Tijd bespaard</div>
+        </div>
+      </div>
+      <button class="welcome-cta" id="welcome-close">Laat maar zien</button>
+    </div>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
   <script>
     const SUPABASE_URL = 'https://lvjdqpklkueajxzznaqq.supabase.co';
@@ -1806,6 +1886,88 @@
       document.getElementById('plan-title').textContent = data.plan || 'Mailbox Manager';
     }
 
+    // ============ FIRST-RUN WELCOME MODAL ============
+    async function maybeShowWelcomeModal(accessToken, firstName) {
+      let data;
+      try {
+        const res = await fetch(API_BASE + '/api/first-run-stats', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) return;
+        data = await res.json();
+      } catch (_) {
+        return;
+      }
+      if (!data || data.seen) return;
+
+      // Personal headline
+      const headline = firstName
+        ? `Welkom bij OfficeFlow, ${firstName}`
+        : 'Welkom bij OfficeFlow';
+      document.getElementById('welcome-headline').textContent = headline;
+
+      // Sensible sub-copy depending on whether we already did work
+      const emails = Number(data.emails_classified || 0);
+      const drafts = Number(data.drafts_created || 0);
+      const sub = document.getElementById('welcome-sub');
+      if (emails > 0) {
+        sub.textContent =
+          'Terwijl jij aan het instellen was, is OfficeFlow al aan de slag gegaan met jouw inbox.';
+      } else {
+        sub.textContent =
+          'OfficeFlow staat klaar. Zodra er nieuwe e-mails binnenkomen, verschijnen ze hier gesorteerd met concepten.';
+      }
+
+      // Populate stat targets
+      const timeHuman = data.time_saved_human || '0s';
+      animateCount(document.getElementById('wc-emails'), emails, 0);
+      animateCount(document.getElementById('wc-drafts'), drafts, 0);
+      // Time saved is already a formatted string ("3u 20m" / "47m" / "12s"),
+      // so just set it directly with a tiny fade-in for polish.
+      const timeEl = document.getElementById('wc-time');
+      timeEl.style.opacity = '0';
+      timeEl.textContent = timeHuman;
+      setTimeout(() => { timeEl.style.transition = 'opacity .6s ease'; timeEl.style.opacity = '1'; }, 250);
+
+      // Show + wire close
+      const overlay = document.getElementById('welcome-modal');
+      overlay.hidden = false;
+
+      const markSeen = async () => {
+        overlay.hidden = true;
+        try {
+          await fetch(API_BASE + '/api/first-run-seen', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + accessToken }
+          });
+        } catch (_) { /* best-effort */ }
+      };
+
+      document.getElementById('welcome-close').addEventListener('click', markSeen, { once: true });
+      // Click on dim backdrop dismisses too
+      overlay.addEventListener('click', (e) => {
+        if (e.target === overlay) markSeen();
+      }, { once: true });
+    }
+
+    function animateCount(el, target, startVal) {
+      if (!el) return;
+      const start = Number(startVal || 0);
+      const end = Number(target || 0);
+      if (end === start) { el.textContent = String(end); return; }
+      const duration = 900;
+      const t0 = performance.now();
+      function frame(now) {
+        const p = Math.min(1, (now - t0) / duration);
+        // easeOutCubic
+        const eased = 1 - Math.pow(1 - p, 3);
+        const v = Math.round(start + (end - start) * eased);
+        el.textContent = String(v);
+        if (p < 1) requestAnimationFrame(frame);
+      }
+      requestAnimationFrame(frame);
+    }
+
     // ============ AUTH GUARD + BOOT ============
     (async () => {
       const { data: { session } } = await sb.auth.getSession();
@@ -1855,6 +2017,11 @@
       renderRecentDrafts(recentDrafts);
       wireRadarControls();
       wireArchiveControls();
+
+      // First-run wow moment — non-blocking, fails silent.
+      maybeShowWelcomeModal(session.access_token, firstName).catch((err) => {
+        console.warn('[welcome] failed:', err);
+      });
 
       document.getElementById('loading').style.display = 'none';
       document.getElementById('page-content').style.display = 'flex';

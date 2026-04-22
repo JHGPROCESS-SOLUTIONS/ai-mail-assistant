@@ -722,6 +722,39 @@ async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
     return data
 
 
+async def supabase_get_count(path_and_query: str, timeout: float = 30.0) -> int:
+    """Return Content-Range total count for a PostgREST query.
+
+    Uses `Prefer: count=exact` + `HEAD` so we don't download rows — just the
+    total. The caller supplies the full `/rest/v1/<table>?filters...&select=id`
+    string. Returns 0 on failure so callers can treat it as a soft count.
+    """
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+
+    headers = supabase_headers()
+    headers["Prefer"] = "count=exact"
+    headers["Range-Unit"] = "items"
+    headers["Range"] = "0-0"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.head(
+                f"{supabase_url}{path_and_query}",
+                headers=headers,
+            )
+        if response.status_code >= 400:
+            return 0
+        content_range = response.headers.get("content-range", "")
+        # Format: "0-0/123" or "*/123"
+        if "/" in content_range:
+            total = content_range.split("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total)
+    except Exception as exc:
+        print(f"[supabase-count] failed for {path_and_query}: {repr(exc)}")
+    return 0
+
+
 async def supabase_post(
     path_and_query: str,
     payload: Any,
@@ -1262,6 +1295,19 @@ async def supabase_get_onboarding_state(user_id: str) -> dict[str, Any] | None:
         f"/rest/v1/onboarding_state?user_id=eq.{quote(user_id, safe='')}&select=*"
     )
     return data[0] if isinstance(data, list) and data else None
+
+
+async def supabase_mark_first_run_seen(user_id: str) -> None:
+    """Stamp first_run_seen_at = now() once — never overwritten."""
+    try:
+        await supabase_patch(
+            f"/rest/v1/onboarding_state"
+            f"?user_id=eq.{quote(user_id, safe='')}"
+            f"&first_run_seen_at=is.null",
+            {"first_run_seen_at": utc_now_iso()},
+        )
+    except Exception as exc:
+        print(f"[first-run] mark seen failed for {user_id}: {repr(exc)}")
 
 
 async def supabase_insert_email(
@@ -6861,11 +6907,335 @@ async def api_recent_drafts(
 
 
 # ---------------------------------------------------------------------------
+# SECTION I.d — FIRST-RUN WOW MOMENT (one-time welcome modal stats)
+# ---------------------------------------------------------------------------
+
+# Conservative estimate: average time saved per AI-drafted reply = 3 minutes
+# (reading + thinking + composing) and per classified mail = 15s (triage).
+TIME_SAVED_PER_DRAFT_MIN = 3
+TIME_SAVED_PER_CLASSIFIED_SEC = 15
+
+
+def _format_time_saved(total_minutes: float) -> str:
+    """Pretty string like '3u 20m' / '47m' / '12s'."""
+    if total_minutes < 1:
+        secs = max(1, int(round(total_minutes * 60)))
+        return f"{secs}s"
+    total = int(round(total_minutes))
+    hours = total // 60
+    mins = total % 60
+    if hours and mins:
+        return f"{hours}u {mins}m"
+    if hours:
+        return f"{hours}u"
+    return f"{mins}m"
+
+
+@app.get("/api/first-run-stats")
+async def api_first_run_stats(user: dict[str, Any] = Depends(get_current_user)):
+    """Return the hero numbers shown in the welcome modal.
+
+    - emails_classified: inserts into public.emails for this user.
+    - drafts_created: drafts this user has in public.drafts.
+    - time_saved_minutes: estimated minutes saved (drafts × 3m + classified × 15s).
+    - seen: true if the user has already dismissed the modal.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    # Has the user already seen the modal?
+    onboarding = await supabase_get_onboarding_state(user_id)
+    seen = bool(onboarding and onboarding.get("first_run_seen_at"))
+
+    # Count classified emails (head+count trick to avoid downloading rows).
+    try:
+        emails_count_resp = await supabase_get_count(
+            f"/rest/v1/emails?user_id=eq.{quote(user_id, safe='')}&select=id"
+        )
+    except Exception as exc:
+        print(f"[first-run] emails count failed: {repr(exc)}")
+        emails_count_resp = 0
+
+    try:
+        drafts_count_resp = await supabase_get_count(
+            f"/rest/v1/drafts?user_id=eq.{quote(user_id, safe='')}&select=id"
+        )
+    except Exception as exc:
+        print(f"[first-run] drafts count failed: {repr(exc)}")
+        drafts_count_resp = 0
+
+    emails_classified = int(emails_count_resp or 0)
+    drafts_created = int(drafts_count_resp or 0)
+
+    minutes_saved = (
+        drafts_created * TIME_SAVED_PER_DRAFT_MIN
+        + emails_classified * (TIME_SAVED_PER_CLASSIFIED_SEC / 60.0)
+    )
+
+    return {
+        "seen": seen,
+        "emails_classified": emails_classified,
+        "drafts_created": drafts_created,
+        "time_saved_minutes": round(minutes_saved, 1),
+        "time_saved_human": _format_time_saved(minutes_saved),
+    }
+
+
+@app.post("/api/first-run-seen")
+async def api_first_run_seen(user: dict[str, Any] = Depends(get_current_user)):
+    """Mark the welcome modal as dismissed. Idempotent — safe to call twice."""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+    await supabase_mark_first_run_seen(user_id)
+    return {"status": "ok"}
+
+
+# ---------------------------------------------------------------------------
+# SECTION I.e — WEEKLY RECAP EMAIL (Saturday 09:00 local)
+# ---------------------------------------------------------------------------
+
+WEEKLY_RECAP_SEND_HOUR = 9   # Saturday local time
+WEEKLY_RECAP_SEND_WEEKDAY = 5  # Monday=0 … Saturday=5
+WEEKLY_RECAP_ENABLED_GLOBAL = os.getenv("WEEKLY_RECAP_ENABLED", "true").lower() == "true"
+
+
+async def get_weekly_recap_stats(user_id: str) -> dict[str, Any]:
+    """Aggregate last 7 days: emails processed, drafts created, busiest day.
+
+    All counts are scoped to `user_id`. Returns zero-filled keys when the DB
+    has nothing so the email template never has to handle nulls.
+    """
+    since_iso = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+
+    emails_rows: list[dict[str, Any]] = []
+    drafts_count = 0
+
+    try:
+        emails_rows = await supabase_get(
+            "/rest/v1/emails"
+            f"?user_id=eq.{quote(user_id, safe='')}"
+            f"&created_at=gte.{quote(since_iso, safe='')}"
+            f"&select=created_at"
+            f"&limit=5000"
+        ) or []
+    except Exception as exc:
+        print(f"[weekly-recap] emails fetch failed: {repr(exc)}")
+
+    try:
+        drafts_count = await supabase_get_count(
+            "/rest/v1/drafts"
+            f"?user_id=eq.{quote(user_id, safe='')}"
+            f"&created_at=gte.{quote(since_iso, safe='')}"
+            f"&select=id"
+        ) or 0
+    except Exception as exc:
+        print(f"[weekly-recap] drafts count failed: {repr(exc)}")
+
+    # Bucket emails by weekday to find busiest day.
+    weekday_counts: dict[int, int] = {i: 0 for i in range(7)}
+    for row in emails_rows:
+        raw = row.get("created_at")
+        if not raw:
+            continue
+        try:
+            iso = raw.replace("Z", "+00:00") if isinstance(raw, str) else raw
+            dt = datetime.fromisoformat(iso)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            weekday_counts[dt.astimezone(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE)).weekday()] += 1
+        except Exception:
+            continue
+
+    busiest_day_idx = max(weekday_counts, key=weekday_counts.get) if weekday_counts else 0
+    busiest_day_count = weekday_counts[busiest_day_idx]
+    weekday_names_nl = ["maandag", "dinsdag", "woensdag", "donderdag", "vrijdag", "zaterdag", "zondag"]
+    busiest_day_label = weekday_names_nl[busiest_day_idx]
+
+    emails_count = len(emails_rows)
+    minutes_saved = (
+        drafts_count * TIME_SAVED_PER_DRAFT_MIN
+        + emails_count * (TIME_SAVED_PER_CLASSIFIED_SEC / 60.0)
+    )
+
+    return {
+        "emails_processed": emails_count,
+        "drafts_created": drafts_count,
+        "time_saved_minutes": round(minutes_saved, 1),
+        "time_saved_human": _format_time_saved(minutes_saved),
+        "busiest_day_label": busiest_day_label,
+        "busiest_day_count": busiest_day_count,
+    }
+
+
+def build_weekly_recap_html(first_name: str, stats: dict[str, Any], user_email: str) -> tuple[str, str]:
+    """Return (subject, html_body) for the weekly recap email."""
+    hello = f"Hoi {first_name}," if first_name else "Hoi,"
+    subject = f"OfficeFlow weekrecap — je bespaarde {stats['time_saved_human']}"
+
+    busiest_line = (
+        f"Je drukste dag was <strong>{stats['busiest_day_label']}</strong> "
+        f"met <strong>{stats['busiest_day_count']}</strong> binnenkomende mails."
+        if stats["busiest_day_count"] > 0
+        else "Rustige week — weinig mail binnengekomen."
+    )
+
+    html = f"""
+    <html><body style="margin:0;padding:0;background:#f6f7f9;font-family:-apple-system,Segoe UI,Roboto,sans-serif;color:#111827;">
+      <div style="max-width:560px;margin:0 auto;padding:32px 24px;">
+        <div style="background:#fff;border-radius:16px;padding:32px 28px;box-shadow:0 1px 3px rgba(0,0,0,.04);border:1px solid #eef0f4;">
+          <div style="font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af;font-weight:700;">Weekrecap</div>
+          <h1 style="font-size:22px;margin:6px 0 4px 0;color:#111827;">{hello}</h1>
+          <p style="margin:0 0 22px 0;color:#4b5563;font-size:15px;line-height:1.5;">
+            Hier is wat OfficeFlow deze week voor je deed.
+          </p>
+
+          <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;">
+            <div style="flex:1;min-width:140px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px;padding:14px 16px;">
+              <div style="font-size:12px;color:#9a3412;font-weight:600;margin-bottom:4px;">Mails verwerkt</div>
+              <div style="font-size:24px;font-weight:800;color:#7c2d12;">{stats['emails_processed']}</div>
+            </div>
+            <div style="flex:1;min-width:140px;background:#ecfdf5;border:1px solid #bbf7d0;border-radius:12px;padding:14px 16px;">
+              <div style="font-size:12px;color:#065f46;font-weight:600;margin-bottom:4px;">Concepten klaargezet</div>
+              <div style="font-size:24px;font-weight:800;color:#064e3b;">{stats['drafts_created']}</div>
+            </div>
+            <div style="flex:1;min-width:140px;background:#eff6ff;border:1px solid #bfdbfe;border-radius:12px;padding:14px 16px;">
+              <div style="font-size:12px;color:#1e40af;font-weight:600;margin-bottom:4px;">Tijd bespaard</div>
+              <div style="font-size:24px;font-weight:800;color:#1e3a8a;">{stats['time_saved_human']}</div>
+            </div>
+          </div>
+
+          <p style="margin:0 0 18px 0;color:#374151;font-size:14px;line-height:1.55;">
+            {busiest_line}
+          </p>
+
+          <a href="https://officeflowcompany.com/dashboard.html"
+             style="display:inline-block;background:#ea580c;color:#fff;text-decoration:none;padding:12px 20px;border-radius:10px;font-weight:600;font-size:14px;">
+            Bekijk je dashboard
+          </a>
+
+          <p style="margin:26px 0 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
+            Je ontvangt deze mail elke zaterdag. Uitschakelen kan in je
+            <a href="https://officeflowcompany.com/preferences.html" style="color:#ea580c;text-decoration:none;">voorkeuren</a>.
+          </p>
+        </div>
+        <div style="text-align:center;font-size:11px;color:#9ca3af;margin-top:14px;">
+          OfficeFlow · {user_email}
+        </div>
+      </div>
+    </body></html>
+    """
+    return subject, html
+
+
+async def send_weekly_recap_for_mailbox(email: str) -> dict[str, Any]:
+    """Build and send the Saturday weekly recap to the given mailbox."""
+    context = await get_gmail_context_by_email(email)
+    user = context["user"]
+    mailbox = context["mailbox"]
+
+    stats = await get_weekly_recap_stats(user["id"])
+
+    first_name = (user.get("full_name") or user.get("email") or "").split(" ")[0].split("@")[0]
+    subject, html_body = build_weekly_recap_html(first_name, stats, email)
+
+    raw = build_briefing_raw_email(to_email=email, subject=subject, html_body=html_body)
+
+    send_response = await gmail_post_json_for_user(
+        user_id=user["id"],
+        url=f"{GMAIL_API_BASE}/messages/send",
+        payload={"raw": raw},
+    )
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            {"weekly_recap_last_sent_at": utc_now_iso()},
+        )
+    except Exception as exc:
+        print(f"[weekly-recap] timestamp patch failed: {repr(exc)}")
+
+    return {
+        "status": "sent",
+        "email": email,
+        "subject": subject,
+        "gmail_message_id": send_response.get("id"),
+        "stats": stats,
+    }
+
+
+async def weekly_recap_loop():
+    """Every 2 min check each mailbox. Send Saturday 09:00 local, once per ISO week."""
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if not WEEKLY_RECAP_ENABLED_GLOBAL:
+                await asyncio.sleep(120)
+                continue
+
+            mailboxes = await get_all_active_mailboxes()
+            for mailbox in mailboxes:
+                try:
+                    email = mailbox.get("email_address")
+                    if not email:
+                        continue
+                    if not mailbox.get("weekly_recap_enabled", True):
+                        continue
+
+                    tz_name = mailbox.get("briefing_timezone") or BRIEFING_DEFAULT_TIMEZONE
+                    try:
+                        now_local = _dt.now(ZoneInfo(tz_name))
+                    except Exception:
+                        now_local = _dt.now(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE))
+
+                    # Only Saturday
+                    if now_local.weekday() != WEEKLY_RECAP_SEND_WEEKDAY:
+                        continue
+                    # Only after 09:00 local
+                    if now_local.hour < WEEKLY_RECAP_SEND_HOUR:
+                        continue
+
+                    # Dedupe within the same ISO week
+                    last_sent_raw = mailbox.get("weekly_recap_last_sent_at")
+                    if last_sent_raw:
+                        try:
+                            last_sent = _dt.fromisoformat(last_sent_raw.replace("Z", "+00:00"))
+                            last_local = last_sent.astimezone(now_local.tzinfo)
+                            if last_local.isocalendar()[:2] == now_local.isocalendar()[:2]:
+                                continue  # already sent this week
+                        except Exception:
+                            pass
+
+                    # Window: from 09:00 until end of Saturday
+                    target = now_local.replace(hour=WEEKLY_RECAP_SEND_HOUR, minute=0, second=0, microsecond=0)
+                    if now_local < target:
+                        continue
+
+                    print(f"[weekly-recap] Sending to {email}...")
+                    result = await send_weekly_recap_for_mailbox(email)
+                    print(f"[weekly-recap] Sent to {email}: {result.get('gmail_message_id')}")
+                except Exception as exc:
+                    print(f"[weekly-recap] Failed for {mailbox.get('email_address')}: {repr(exc)}")
+        except Exception as exc:
+            print(f"[weekly-recap] Loop error: {repr(exc)}")
+
+        await asyncio.sleep(120)
+
+
+@app.post("/api/weekly-recap/run-now")
+async def http_send_weekly_recap(email: str = Body(..., embed=True)):
+    """Manual trigger for testing — sends the recap immediately regardless of day/time."""
+    return await send_weekly_recap_for_mailbox(email)
+
+
+# ---------------------------------------------------------------------------
 # SECTION F — STARTUP HOOK (add briefing + radar loops to background tasks)
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def start_features_background_tasks():
-    print("Features background tasks started (briefing + radar + silence)")
+    print("Features background tasks started (briefing + radar + silence + weekly recap)")
     asyncio.create_task(briefing_loop())
     asyncio.create_task(radar_loop())
+    asyncio.create_task(weekly_recap_loop())
