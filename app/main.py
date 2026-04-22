@@ -144,16 +144,28 @@ SENT_REPLY_STATUS_LABELS = {
     "Done",
 }
 
-# Labels whose mail doesn't belong in the primary inbox.
+# Safe set — labels that are almost never important inbox material.
 # When a mail is classified into one of these AND the mailbox has
 # auto_archive_low_value=true, OfficeFlow removes the INBOX label so the
 # thread disappears from Inbox but stays findable via its status label.
 LOW_VALUE_LABELS = {
     "Marketing",
-    "Notification",
     "Ignore",
     "Unwanted",
 }
+
+# Notification is opt-in (notification_auto_archive on mailbox) because
+# notifications are often transactional (banking, delivery, 2FA, tax) and
+# users may want to keep seeing them in their primary inbox.
+NOTIFICATION_AUTO_ARCHIVE_LABEL = "Notification"
+
+# Labels that mark a sender as trusted — any prior mail from a sender with
+# one of these labels means we never auto-archive further mail from them.
+TRUSTED_INDICATOR_LABELS = (
+    "Priority",
+    "To Respond",
+    "Follow Up",
+)
 
 LABEL_COLORS = {
     "Priority": {
@@ -1726,6 +1738,69 @@ async def archive_low_value_thread(
             print(f"[auto-archive] msg {thread_message_id}: {repr(exc)}")
 
 
+async def is_trusted_sender(
+    user_id: str,
+    sender_email: str | None,
+    cache: dict[str, bool] | None = None,
+) -> bool:
+    """True if the user has ever communicated with this sender or previously
+    flagged their mail as important.
+
+    Two safety-net checks (OR-combined):
+      1. User has sent at least one mail TO this sender (reply history).
+      2. At least one mail FROM this sender was previously labeled
+         Priority / To Respond / Follow Up.
+
+    Used as a guard before auto-archiving. Bekende contacten worden nooit
+    uit de Inbox gehaald, ook niet als een mail als Marketing gelabeld wordt.
+    """
+    if not sender_email:
+        return False
+    normalized = sender_email.lower().strip()
+    if not normalized:
+        return False
+    if cache is not None and normalized in cache:
+        return cache[normalized]
+
+    trusted = False
+
+    # Check 1: reply history — have we ever sent to this address?
+    try:
+        data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/messages",
+            params={
+                "q": f'in:sent to:"{normalized}"',
+                "maxResults": 1,
+            },
+        )
+        if data.get("messages"):
+            trusted = True
+    except Exception as exc:
+        print(f"[trust-list] sent-check failed for {normalized}: {repr(exc)}")
+
+    # Check 2: prior-important history — ever labeled Priority / To Respond / Follow Up?
+    if not trusted:
+        label_clause = " OR ".join(f'label:"{name}"' for name in TRUSTED_INDICATOR_LABELS)
+        try:
+            data = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/messages",
+                params={
+                    "q": f'from:"{normalized}" ({label_clause})',
+                    "maxResults": 1,
+                },
+            )
+            if data.get("messages"):
+                trusted = True
+        except Exception as exc:
+            print(f"[trust-list] important-label check failed for {normalized}: {repr(exc)}")
+
+    if cache is not None:
+        cache[normalized] = trusted
+    return trusted
+
+
 async def ensure_label_exists(user_id: str, label_name: str) -> str:
     current_labels = await get_all_gmail_labels(user_id)
 
@@ -3186,19 +3261,39 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         )
 
         # --- AUTO-ARCHIVE LOW-VALUE MAIL ---
-        # Marketing / Notification / Ignore / Unwanted leave the primary inbox
-        # while staying findable via their status label. Toggle per mailbox.
+        # Safe set (Marketing / Ignore / Unwanted) is archived by default when
+        # auto_archive_low_value is on. Notification is opt-in via
+        # notification_auto_archive because notifications are often transactional.
+        # Guarded by the trust-list: bekende contacten worden nooit gearchiveerd.
         try:
-            if (
-                target_label in LOW_VALUE_LABELS
-                and bool(mailbox.get("auto_archive_low_value", True))
-            ):
-                await archive_low_value_thread(
+            auto_archive_on = bool(mailbox.get("auto_archive_low_value", True))
+            in_safe_set = target_label in LOW_VALUE_LABELS
+            in_notification_optin = (
+                target_label == NOTIFICATION_AUTO_ARCHIVE_LABEL
+                and bool(mailbox.get("notification_auto_archive", False))
+            )
+            if auto_archive_on and (in_safe_set or in_notification_optin):
+                sender_email = extract_email_address(from_header) or ""
+                trusted = await is_trusted_sender(
                     user_id=user["id"],
-                    thread_id=thread_id,
-                    current_message_id=message_id,
+                    sender_email=sender_email,
                 )
-                current_label_ids.discard("INBOX")
+                if trusted:
+                    classification_reason = (
+                        (classification_reason or "").rstrip(" ·")
+                        + " · Trusted sender — kept in Inbox"
+                    ).lstrip(" ·").strip()
+                else:
+                    await archive_low_value_thread(
+                        user_id=user["id"],
+                        thread_id=thread_id,
+                        current_message_id=message_id,
+                    )
+                    current_label_ids.discard("INBOX")
+                    classification_reason = (
+                        (classification_reason or "").rstrip(" ·")
+                        + " · Auto-archived (low-value label)"
+                    ).lstrip(" ·").strip()
         except Exception as exc:
             print(f"[auto-archive-hook] thread {thread_id}: {repr(exc)}")
 
@@ -6327,7 +6422,7 @@ async def radar_run_now(user: dict[str, Any] = Depends(get_current_user)):
 
 @app.get("/api/archive/settings")
 async def archive_get_settings(user: dict[str, Any] = Depends(get_current_user)):
-    """Current auto-archive setting + counts of Low-value mail still in Inbox."""
+    """Current auto-archive settings + counts of low-value mail still in Inbox."""
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=400, detail="User id ontbreekt")
@@ -6336,11 +6431,16 @@ async def archive_get_settings(user: dict[str, Any] = Depends(get_current_user))
     if not mailbox:
         raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
 
+    notif_on = bool(mailbox.get("notification_auto_archive", False))
+    counted_labels = sorted(LOW_VALUE_LABELS) + (
+        [NOTIFICATION_AUTO_ARCHIVE_LABEL] if notif_on else []
+    )
+
     # Count leftover low-value mail currently still in Inbox (best-effort).
     in_inbox_counts: dict[str, int] = {}
     total_in_inbox = 0
     try:
-        for label_name in sorted(LOW_VALUE_LABELS):
+        for label_name in counted_labels:
             q = f'in:inbox label:"{label_name}"'
             data = await gmail_get_json_for_user(
                 user_id=user_id,
@@ -6356,9 +6456,12 @@ async def archive_get_settings(user: dict[str, Any] = Depends(get_current_user))
     return {
         "status": "ok",
         "auto_archive_low_value": bool(mailbox.get("auto_archive_low_value", True)),
+        "notification_auto_archive": notif_on,
         "low_value_labels": sorted(LOW_VALUE_LABELS),
+        "notification_label": NOTIFICATION_AUTO_ARCHIVE_LABEL,
         "in_inbox_counts": in_inbox_counts,
         "total_in_inbox": total_in_inbox,
+        "trusted_sender_protection": True,
     }
 
 
@@ -6367,7 +6470,7 @@ async def archive_update_settings(
     body: dict[str, Any] = Body(default_factory=dict),
     user: dict[str, Any] = Depends(get_current_user),
 ):
-    """Toggle auto-archive for low-value labels."""
+    """Toggle auto-archive for low-value labels and Notification opt-in."""
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=400, detail="User id ontbreekt")
@@ -6376,10 +6479,14 @@ async def archive_update_settings(
     if not mailbox:
         raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
 
-    if "auto_archive_low_value" not in body:
-        return {"status": "noop", "applied": {}}
+    patch: dict[str, Any] = {}
+    if "auto_archive_low_value" in body:
+        patch["auto_archive_low_value"] = bool(body["auto_archive_low_value"])
+    if "notification_auto_archive" in body:
+        patch["notification_auto_archive"] = bool(body["notification_auto_archive"])
 
-    patch = {"auto_archive_low_value": bool(body["auto_archive_low_value"])}
+    if not patch:
+        return {"status": "noop", "applied": {}}
 
     try:
         await supabase_patch(
@@ -6396,7 +6503,12 @@ async def archive_update_settings(
 @app.post("/api/cleanup/low-value")
 async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_user)):
     """One-shot sweep: remove INBOX from every existing low-value mail.
-    Does NOT delete anything. Mails stay in All Mail + keep their status label.
+
+    - Does NOT delete anything. Mails stay in All Mail + keep their status label.
+    - Trust-list: skip any mail whose sender is a known contact (reply history
+      or prior Priority / To Respond / Follow Up label).
+    - Notification is only swept when notification_auto_archive is on for
+      the mailbox.
     """
     user_id = user.get("id")
     if not user_id:
@@ -6406,11 +6518,19 @@ async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_u
     if not mailbox:
         raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
 
-    per_label: dict[str, int] = {}
-    total_archived = 0
-    errors = 0
+    notif_on = bool(mailbox.get("notification_auto_archive", False))
+    sweep_labels = sorted(LOW_VALUE_LABELS) + (
+        [NOTIFICATION_AUTO_ARCHIVE_LABEL] if notif_on else []
+    )
 
-    for label_name in sorted(LOW_VALUE_LABELS):
+    per_label: dict[str, int] = {}
+    per_label_skipped: dict[str, int] = {}
+    total_archived = 0
+    total_skipped = 0
+    errors = 0
+    trust_cache: dict[str, bool] = {}
+
+    for label_name in sweep_labels:
         try:
             q = f'in:inbox label:"{label_name}"'
             data = await gmail_get_json_for_user(
@@ -6422,13 +6542,45 @@ async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_u
             print(f"[cleanup-low-value] list {label_name}: {repr(exc)}")
             errors += 1
             per_label[label_name] = 0
+            per_label_skipped[label_name] = 0
             continue
 
         archived = 0
+        skipped = 0
         for msg in data.get("messages", []) or []:
             mid = msg.get("id")
             if not mid:
                 continue
+
+            # Fetch sender for trust-list check
+            try:
+                detail = await gmail_get_json_for_user(
+                    user_id=user_id,
+                    url=f"{GMAIL_API_BASE}/messages/{mid}",
+                    params={"format": "metadata", "metadataHeaders": "From"},
+                )
+                from_header = get_header_value(
+                    detail.get("payload", {}).get("headers", []), "From"
+                )
+                sender_email = extract_email_address(from_header) or ""
+            except Exception as exc:
+                print(f"[cleanup-low-value] header fetch msg {mid}: {repr(exc)}")
+                sender_email = ""
+
+            try:
+                trusted = await is_trusted_sender(
+                    user_id=user_id,
+                    sender_email=sender_email,
+                    cache=trust_cache,
+                )
+            except Exception as exc:
+                print(f"[cleanup-low-value] trust check msg {mid}: {repr(exc)}")
+                trusted = False
+
+            if trusted:
+                skipped += 1
+                continue
+
             try:
                 await modify_gmail_message_labels(
                     user_id=user_id,
@@ -6439,13 +6591,18 @@ async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_u
             except Exception as exc:
                 print(f"[cleanup-low-value] strip INBOX msg {mid}: {repr(exc)}")
                 errors += 1
+
         per_label[label_name] = archived
+        per_label_skipped[label_name] = skipped
         total_archived += archived
+        total_skipped += skipped
 
     return {
         "status": "ok",
         "archived_per_label": per_label,
+        "skipped_trusted_per_label": per_label_skipped,
         "total_archived": total_archived,
+        "total_skipped_trusted": total_skipped,
         "errors": errors,
     }
 
