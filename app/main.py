@@ -167,6 +167,27 @@ TRUSTED_INDICATOR_LABELS = (
     "Follow Up",
 )
 
+# -----------------------------------------------------------------------------
+# Classifier confidence (draft-triage signal).
+# Applied as a separate Gmail label on the incoming message so users can
+# triage their inbox at a glance without touching draft bodies.
+#   high   -> "AI · Sure"   (green)   — AI is confident, safe to skim + send
+#   medium -> "AI · Check"  (yellow)  — AI is reasonably sure, quick review
+#   low    -> "AI · Review" (red)     — AI is uncertain, read carefully
+# These labels are orthogonal to status labels (Priority / To Respond / ...)
+# and are NOT stripped by sync_thread_status. They DO get replaced when a
+# thread is reclassified (e.g. on reopen) so they stay current per message.
+# -----------------------------------------------------------------------------
+CONFIDENCE_VALUES = ("high", "medium", "low")
+
+CONFIDENCE_LABEL_BY_VALUE = {
+    "high": "AI · Sure",
+    "medium": "AI · Check",
+    "low": "AI · Review",
+}
+
+CONFIDENCE_LABEL_NAMES = tuple(CONFIDENCE_LABEL_BY_VALUE.values())
+
 LABEL_COLORS = {
     "Priority": {
         "textColor": "#ffffff",
@@ -203,6 +224,19 @@ LABEL_COLORS = {
     "Ignore": {
         "textColor": "#ffffff",
         "backgroundColor": "#822111",
+    },
+    # Confidence labels — orthogonal triage signal
+    "AI · Sure": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#16a766",
+    },
+    "AI · Check": {
+        "textColor": "#000000",
+        "backgroundColor": "#f6bf26",
+    },
+    "AI · Review": {
+        "textColor": "#ffffff",
+        "backgroundColor": "#cc3a21",
     },
 }
 
@@ -674,6 +708,20 @@ def safe_parse_json(content: str) -> dict[str, Any]:
     cleaned = re.sub(r"\s*```$", "", cleaned)
 
     return json.loads(cleaned)
+
+
+def normalize_confidence(raw: Any) -> str:
+    """Coerce classifier confidence to one of CONFIDENCE_VALUES.
+
+    Accepts str (case-insensitive), falls back to 'medium' when missing or
+    unrecognized. We pick 'medium' (not 'low') as the default so a missing
+    field doesn't flood inboxes with red Review labels.
+    """
+    if isinstance(raw, str):
+        value = raw.strip().lower()
+        if value in CONFIDENCE_VALUES:
+            return value
+    return "medium"
 
 
 async def supabase_get(path_and_query: str, timeout: float = 30.0) -> Any:
@@ -1971,6 +2019,55 @@ async def sync_single_label(
     return current_label_ids
 
 
+async def sync_confidence_label(
+    user_id: str,
+    gmail_message_id: str,
+    current_label_ids: set[str],
+    label_name_to_id: dict[str, str],
+    confidence_value: str | None,
+) -> set[str]:
+    """Apply the matching AI-confidence label to a message and strip stale
+    confidence labels. Orthogonal to status labels — never touches
+    Priority / To Respond / ...
+
+    Best-effort: if Gmail rejects the modify call we log and return the
+    original label set so classification itself stays unaffected.
+    """
+    target_label_name = CONFIDENCE_LABEL_BY_VALUE.get(confidence_value or "")
+    target_label_id = label_name_to_id.get(target_label_name) if target_label_name else None
+
+    remove_label_ids: list[str] = []
+    for label_name in CONFIDENCE_LABEL_NAMES:
+        label_id = label_name_to_id.get(label_name)
+        if label_id and label_id in current_label_ids and label_id != target_label_id:
+            remove_label_ids.append(label_id)
+
+    add_label_ids: list[str] = []
+    if target_label_id and target_label_id not in current_label_ids:
+        add_label_ids.append(target_label_id)
+
+    if not add_label_ids and not remove_label_ids:
+        return current_label_ids
+
+    try:
+        await modify_gmail_message_labels(
+            user_id=user_id,
+            gmail_message_id=gmail_message_id,
+            add_label_ids=add_label_ids or None,
+            remove_label_ids=remove_label_ids or None,
+        )
+    except Exception as exc:
+        print(f"[confidence-label] msg {gmail_message_id}: {repr(exc)}")
+        return current_label_ids
+
+    updated = set(current_label_ids)
+    for label_id in remove_label_ids:
+        updated.discard(label_id)
+    for label_id in add_label_ids:
+        updated.add(label_id)
+    return updated
+
+
 async def sync_thread_status(
     user_id: str,
     thread_id: str | None,
@@ -2192,7 +2289,10 @@ async def get_thread_reply_state(
 async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
-    for label_name in LABELS:
+    # Status labels (Priority / To Respond / ...) + confidence labels
+    # (AI · Sure / Check / Review). Confidence labels are orthogonal but we
+    # register them in the same table so label_name_to_id can resolve them.
+    for label_name in list(LABELS) + list(CONFIDENCE_LABEL_NAMES):
         label_id = await ensure_label_exists(user_id=user_id, label_name=label_name)
 
         saved = await supabase_upsert_gmail_label(
@@ -2225,6 +2325,7 @@ async def classify_email(subject: str | None, sender: str | None, body_text: str
         return {
             "label": "FYI",
             "reason": "Body text too short or empty to classify",
+            "confidence": "low",
             "generate_draft": False,
         }
 
@@ -2254,10 +2355,16 @@ Belangrijk:
 - Bij twijfel tussen Priority en To Respond -> kies To Respond.
 - Bij twijfel tussen Marketing en Ignore -> kies Marketing (veiliger voor gebruiker).
 
+Geef ook een confidence score terug (hoe zeker ben je van de classificatie):
+- "high": signalen in de mail zijn eenduidig; geen significante twijfel tussen labels.
+- "medium": waarschijnlijk correct, maar er zijn 1-2 signalen die ook een ander label zouden kunnen rechtvaardigen.
+- "low": onduidelijk, korte of dubbelzinnige mail, mogelijke misclassificatie.
+
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
   "label": "To Respond",
-  "reason": "Korte reden"
+  "reason": "Korte reden",
+  "confidence": "high"
 }}
 
 Van: {sender}
@@ -2295,6 +2402,7 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": f"Classifier unavailable: {type(exc).__name__}",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
@@ -2304,6 +2412,7 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": f"Classifier HTTP {response.status_code}",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
@@ -2315,23 +2424,27 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": "Classifier returned invalid JSON",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
     label = parsed.get("label")
     reason = parsed.get("reason") or "No reason given"
+    confidence = normalize_confidence(parsed.get("confidence"))
 
     if label not in CLASSIFIER_LABELS:
         print(f"[classify_email] Unknown label '{label}' -- falling back to 'To Respond'")
         return {
             "label": "To Respond",
             "reason": f"Classifier returned unknown label '{label}'",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
     return {
         "label": label,
         "reason": reason,
+        "confidence": confidence,
         "generate_draft": LABEL_RULES[label]["generate_draft"],
     }
 
@@ -2344,6 +2457,7 @@ async def classify_follow_up_email(subject: str | None, sender: str | None, body
         return {
             "label": "FYI",
             "reason": "Body text too short or empty to classify",
+            "confidence": "low",
             "generate_draft": False,
         }
 
@@ -2382,10 +2496,16 @@ Belangrijke voorkeur:
 - Kies Waiting On Reply alleen als het gesprek nog open voelt maar niet echt klaar is.
 - Bij twijfel tussen To Respond en een andere label -> kies To Respond.
 
+Geef ook een confidence score terug (hoe zeker ben je van de classificatie):
+- "high": signalen in de mail zijn eenduidig; geen significante twijfel tussen labels.
+- "medium": waarschijnlijk correct, maar er zijn 1-2 signalen die ook een ander label zouden kunnen rechtvaardigen.
+- "low": onduidelijk, korte of dubbelzinnige mail, mogelijke misclassificatie.
+
 Geef alleen geldige JSON terug in exact dit formaat:
 {{
   "label": "Done",
-  "reason": "Korte reden"
+  "reason": "Korte reden",
+  "confidence": "high"
 }}
 
 Van: {sender}
@@ -2423,6 +2543,7 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": f"Classifier unavailable: {type(exc).__name__}",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
@@ -2432,6 +2553,7 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": f"Classifier HTTP {response.status_code}",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
@@ -2443,23 +2565,27 @@ E-mail:
         return {
             "label": "To Respond",
             "reason": "Classifier returned invalid JSON",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
     label = parsed.get("label")
     reason = parsed.get("reason") or "No reason given"
+    confidence = normalize_confidence(parsed.get("confidence"))
 
     if label not in FOLLOW_UP_CLASSIFIER_LABELS:
         print(f"[classify_follow_up_email] Unknown label '{label}' -- fallback 'To Respond'")
         return {
             "label": "To Respond",
             "reason": f"Classifier returned unknown label '{label}'",
+            "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
     return {
         "label": label,
         "reason": reason,
+        "confidence": confidence,
         "generate_draft": LABEL_RULES[label]["generate_draft"],
     }
 
@@ -3225,6 +3351,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             )
             target_label = classification["label"]
             classification_reason = classification["reason"]
+            classification_confidence = normalize_confidence(classification.get("confidence"))
             thread_status = "reopened"
         else:
             classification = await classify_email(
@@ -3234,6 +3361,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             )
             target_label = classification["label"]
             classification_reason = classification["reason"]
+            classification_confidence = normalize_confidence(classification.get("confidence"))
             thread_status = "classified"
 
         # --- FOLLOW-UP RADAR: close any active commitment on this thread
@@ -3259,6 +3387,21 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             label_name_to_id=label_name_to_id,
             target_label_name=target_label,
         )
+
+        # --- CONFIDENCE TRIAGE LABEL ---
+        # Apply AI · Sure / Check / Review on the incoming message so users
+        # can triage at a glance inside Gmail inbox. Best-effort: failures
+        # are logged but never break classification or draft generation.
+        try:
+            current_label_ids = await sync_confidence_label(
+                user_id=user["id"],
+                gmail_message_id=message_id,
+                current_label_ids=current_label_ids,
+                label_name_to_id=label_name_to_id,
+                confidence_value=classification_confidence,
+            )
+        except Exception as exc:
+            print(f"[confidence-label-hook] msg {message_id}: {repr(exc)}")
 
         # --- AUTO-ARCHIVE LOW-VALUE MAIL ---
         # Safe set (Marketing / Ignore / Unwanted) is archived by default when
@@ -3368,6 +3511,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 "body_text": body_text[:500] if body_text else None,
                 "label_ids": list(current_label_ids),
                 "label": target_label,
+                "confidence": classification_confidence,
                 "generate_draft": should_generate_draft,
                 "classification_reason": classification_reason,
                 "draft_created": draft_created,
