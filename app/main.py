@@ -851,6 +851,38 @@ async def get_user_for_billing(email: str) -> dict[str, Any]:
 # Supabase Auth helpers (JWT + invites)
 # ----------------------------
 
+async def _verify_token_via_supabase(token: str) -> dict[str, Any]:
+    """
+    Fallback verification: ask Supabase Auth API to validate the token.
+    Works with any JWT signing method (HS256 legacy OR ES256/RS256
+    asymmetric signing keys). Returns the auth user payload.
+    """
+    supabase_url = require_env(SUPABASE_URL, "SUPABASE_URL")
+    # Prefer anon key if present, otherwise fall back to service-role for the apikey header.
+    apikey = os.getenv("SUPABASE_ANON_KEY") or SUPABASE_SERVICE_ROLE_KEY
+    if not apikey:
+        raise HTTPException(status_code=500, detail="SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY missing")
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        res = await client.get(
+            f"{supabase_url}/auth/v1/user",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "apikey": apikey,
+            },
+        )
+
+    if res.status_code == 401:
+        raise HTTPException(status_code=401, detail="Token expired or invalid")
+    if res.status_code != 200:
+        raise HTTPException(status_code=401, detail=f"Auth verify failed ({res.status_code})")
+
+    try:
+        return res.json()
+    except Exception:
+        raise HTTPException(status_code=401, detail="Auth verify returned non-JSON")
+
+
 async def get_current_user(
     authorization: Optional[str] = Header(None),
 ) -> dict[str, Any]:
@@ -859,27 +891,40 @@ async def get_current_user(
     `Authorization: Bearer <token>` and returns the matching row from
     public.users. Raises 401 if the token is missing/invalid or 403 if
     there is no corresponding user row.
+
+    Fast path: local HS256 decode with SUPABASE_JWT_SECRET (legacy).
+    Fallback: remote verification via Supabase Auth API — needed when
+    the project uses asymmetric signing keys (ES256/RS256).
     """
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=401, detail="Missing bearer token")
 
     token = authorization.split(" ", 1)[1].strip()
-    jwt_secret = require_env(SUPABASE_JWT_SECRET, "SUPABASE_JWT_SECRET")
+    email: str = ""
 
-    try:
-        decoded = jwt.decode(
-            token,
-            jwt_secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"verify_aud": True},
-        )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Token expired")
-    except jwt.InvalidTokenError as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}")
+    # --- Fast path: local HS256 decode ---
+    if SUPABASE_JWT_SECRET:
+        try:
+            decoded = jwt.decode(
+                token,
+                SUPABASE_JWT_SECRET,
+                algorithms=["HS256"],
+                audience="authenticated",
+                options={"verify_aud": True},
+            )
+            email = (decoded.get("email") or "").strip().lower()
+        except jwt.ExpiredSignatureError:
+            raise HTTPException(status_code=401, detail="Token expired")
+        except jwt.InvalidTokenError:
+            # Likely an ES256/RS256 token from new Supabase signing keys —
+            # fall through to Supabase Auth API verification below.
+            email = ""
 
-    email = (decoded.get("email") or "").strip().lower()
+    # --- Fallback: verify via Supabase Auth API ---
+    if not email:
+        auth_user = await _verify_token_via_supabase(token)
+        email = (auth_user.get("email") or "").strip().lower()
+
     if not email:
         raise HTTPException(status_code=401, detail="Token missing email claim")
 
