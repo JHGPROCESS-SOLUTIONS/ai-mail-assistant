@@ -1100,6 +1100,58 @@ async def supabase_update_mailbox_status(mailbox_id: str, status: str) -> dict[s
     return data[0] if isinstance(data, list) and data else data
 
 
+def _mailbox_cutoff_epoch(mailbox: dict[str, Any] | None) -> int | None:
+    """Return the mailbox's inbox_cutoff_at as Unix epoch seconds.
+
+    Used to add `after:<epoch>` to the Gmail search query so the classifier
+    never sees mail that existed before the mailbox was connected. Returns
+    None when the field is missing or unparseable — in that case the caller
+    falls back to the unrestricted `in:inbox is:unread` query.
+    """
+    if not mailbox:
+        return None
+    raw = mailbox.get("inbox_cutoff_at")
+    if not raw:
+        return None
+    try:
+        # Postgres timestamptz serializes as ISO8601 with a trailing 'Z' or
+        # a numeric offset. Python's fromisoformat understands both only in
+        # 3.11+, and earlier versions choke on 'Z'. Normalise first.
+        iso = raw.replace("Z", "+00:00") if isinstance(raw, str) else raw
+        dt = datetime.fromisoformat(iso) if isinstance(iso, str) else iso
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception as exc:
+        print(f"[inbox-cutoff] parse failed for {raw!r}: {repr(exc)}")
+        return None
+
+
+async def ensure_mailbox_inbox_cutoff(mailbox: dict[str, Any]) -> None:
+    """Stamp inbox_cutoff_at = now() the first time this mailbox is used.
+
+    Ensures the classifier only ever looks at mail that arrived AFTER the
+    mailbox was connected to OfficeFlow. We never overwrite an existing
+    cutoff — it's a permanent floor. Mutates the passed mailbox dict so the
+    caller's in-memory copy reflects the freshly stamped timestamp.
+    """
+    if not mailbox or mailbox.get("inbox_cutoff_at"):
+        return
+    mailbox_id = mailbox.get("id")
+    if not mailbox_id:
+        return
+    stamp = utc_now_iso()
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{quote(mailbox_id, safe='')}"
+            f"&inbox_cutoff_at=is.null",
+            {"inbox_cutoff_at": stamp},
+        )
+        mailbox["inbox_cutoff_at"] = stamp
+    except Exception as exc:
+        print(f"[inbox-cutoff] mailbox {mailbox_id} stamp failed: {repr(exc)}")
+
+
 async def get_all_active_mailboxes() -> list[dict[str, Any]]:
     data = await supabase_get(
         "/rest/v1/mailboxes?status=eq.connected&provider=eq.gmail&select=*"
@@ -3204,19 +3256,32 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
         mailbox_id=mailbox["id"],
     )
 
+    # Ensure this mailbox has an inbox_cutoff_at — first time only. After
+    # this, the classifier ignores everything with internalDate < cutoff.
+    # Mutates `mailbox` in place so cutoff_epoch below sees the stamp.
+    await ensure_mailbox_inbox_cutoff(mailbox)
+
     label_map = await get_all_gmail_labels(user["id"])
     label_name_to_id = {name: label["id"] for name, label in label_map.items()}
     custom_label_ids = get_status_label_ids_from_map(label_name_to_id)
 
     results: list[dict[str, Any]] = []
 
-    # 1) Alleen nieuwe/ongelezen inbox mails verwerken
+    # Build the Gmail search query. We only want UNREAD inbox mail that
+    # arrived AFTER the mailbox was connected to OfficeFlow — old unread
+    # marketing / notification mail from before the connect must stay out
+    # of scope, otherwise the Marketing label keeps filling up with ancient
+    # promos each run.
+    cutoff_epoch = _mailbox_cutoff_epoch(mailbox)
+    base_query = "in:inbox is:unread"
+    gmail_query = f"{base_query} after:{cutoff_epoch}" if cutoff_epoch else base_query
+
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
         url=f"{GMAIL_API_BASE}/messages",
         params={
             "maxResults": max_results,
-            "q": "in:inbox is:unread",
+            "q": gmail_query,
         },
     )
 
@@ -3231,6 +3296,18 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             user_id=user["id"],
             url=f"{GMAIL_API_BASE}/messages/{message_id}",
         )
+
+        # Defensive cutoff check — Gmail's `after:` operator is usually
+        # reliable, but we belt-and-brace with internalDate (ms since epoch)
+        # so historic mail can never slip through even if the query is off.
+        if cutoff_epoch is not None:
+            try:
+                internal_ms = int(message_data.get("internalDate") or 0)
+                if internal_ms and internal_ms // 1000 < cutoff_epoch:
+                    # Skip silently — this mail predates the OfficeFlow connect.
+                    continue
+            except Exception:
+                pass
 
         payload = message_data.get("payload", {})
         headers = payload.get("headers", [])
