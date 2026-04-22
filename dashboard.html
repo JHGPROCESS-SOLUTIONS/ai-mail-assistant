@@ -626,6 +626,60 @@
       from { opacity:0; transform: translateY(-4px); }
       to   { opacity:1; transform: translateY(0); }
     }
+
+    /* ==== Laatste concepten (confidence dot feed) ==== */
+    .rd-header {
+      display:flex; align-items:center; justify-content:space-between;
+      margin-bottom:10px; flex-wrap:wrap; gap:8px;
+    }
+    .rd-summary {
+      display:flex; align-items:center; gap:12px;
+      font-size:12px; color:var(--text-2); font-weight:600;
+    }
+    .rd-summary .rd-sum-item { display:inline-flex; align-items:center; gap:5px; }
+    .rd-list {
+      display:flex; flex-direction:column; gap:8px;
+      list-style:none; padding:0; margin:0;
+    }
+    .rd-item {
+      display:flex; align-items:center; gap:12px;
+      padding:12px 14px; border:1px solid #eef0f4; border-radius:12px;
+      background:#fff; text-decoration:none; color:inherit;
+      transition: background .15s ease, border-color .15s ease, transform .08s ease;
+    }
+    .rd-item:hover {
+      background:#fafbfd; border-color:#e2e6ee;
+      transform: translateY(-1px);
+    }
+    .rd-dot {
+      width:10px; height:10px; border-radius:50%; flex:none;
+      background:#d1d5db;
+      box-shadow: 0 0 0 3px rgba(209,213,219,.18);
+    }
+    .rd-dot.high   { background:#16a34a; box-shadow: 0 0 0 3px rgba(22,163,74,.18); }
+    .rd-dot.medium { background:#eab308; box-shadow: 0 0 0 3px rgba(234,179,8,.22); }
+    .rd-dot.low    { background:#dc2626; box-shadow: 0 0 0 3px rgba(220,38,38,.18); }
+    .rd-body { min-width:0; flex:1; }
+    .rd-title {
+      font-size:14px; font-weight:600; color:#111827;
+      line-height:1.35;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    .rd-meta { font-size:12px; color:var(--text-3); margin-top:2px; }
+    .rd-time {
+      font-size:11px; color:var(--text-3); font-weight:600;
+      white-space:nowrap; flex:none;
+    }
+    .rd-empty {
+      padding:18px; text-align:center;
+      font-size:13px; color:var(--text-3);
+      border:1px dashed #e5e7eb; border-radius:12px; background:#fafbfd;
+    }
+    .rd-legend {
+      margin-top:10px; font-size:11px; color:var(--text-3);
+      display:flex; gap:12px; flex-wrap:wrap;
+    }
+    .rd-legend .rd-sum-item { display:inline-flex; align-items:center; gap:5px; }
   </style>
 </head>
 <body>
@@ -951,6 +1005,34 @@
         </div>
       </section>
 
+      <!-- ============ LAATSTE CONCEPTEN ============ -->
+      <section id="recent-drafts">
+        <div class="section-title">Laatste concepten</div>
+        <div class="card">
+          <div class="rd-header">
+            <div>
+              <div class="card-label">Zeker­heid per concept</div>
+              <div class="card-meta" style="margin-top:4px;">
+                Groen = AI is zeker, geel = quick check, rood = even goed lezen. Klik een rij om de Gmail-thread te openen.
+              </div>
+            </div>
+            <div class="rd-summary" id="rd-summary" aria-live="polite">
+              <span class="rd-sum-item"><span class="rd-dot high"></span><span id="rd-count-high">0</span></span>
+              <span class="rd-sum-item"><span class="rd-dot medium"></span><span id="rd-count-medium">0</span></span>
+              <span class="rd-sum-item"><span class="rd-dot low"></span><span id="rd-count-low">0</span></span>
+            </div>
+          </div>
+          <div id="rd-body">
+            <div class="rd-empty">Concepten laden…</div>
+          </div>
+          <div class="rd-legend" aria-hidden="true">
+            <span class="rd-sum-item"><span class="rd-dot high"></span>High — meestal direct te verzenden</span>
+            <span class="rd-sum-item"><span class="rd-dot medium"></span>Medium — quick review</span>
+            <span class="rd-sum-item"><span class="rd-dot low"></span>Low — lees goed voor je stuurt</span>
+          </div>
+        </div>
+      </section>
+
       <!-- ============ ABONNEMENT ============ -->
       <section id="abonnement">
         <div class="section-title">Abonnement</div>
@@ -993,17 +1075,33 @@
             <div class="rc-row">
               <div>
                 <div class="k">Marketing &amp; ruis uit je Inbox halen</div>
-                <div class="s">Mails met label Marketing, Notification, Ignore of Unwanted verlaten je primaire Inbox en blijven vindbaar via hun label. Niets wordt verwijderd.</div>
+                <div class="s">Mails met label <strong>Marketing</strong>, <strong>Ignore</strong> of <strong>Unwanted</strong> verlaten je primaire Inbox en blijven vindbaar via hun label. Niets wordt verwijderd.</div>
               </div>
               <label class="switch" aria-label="Auto-archive low-value aan/uit">
                 <input id="tgl-auto-archive" type="checkbox">
                 <span class="slider"></span>
               </label>
             </div>
+            <div class="rc-row">
+              <div>
+                <div class="k">Ook Notification-mails automatisch archiveren</div>
+                <div class="s">Standaard <strong>uit</strong> — notificaties zijn soms transactioneel (bank, bezorging, 2FA, belastingdienst). Zet alleen aan als je zeker weet dat je die niet mist.</div>
+              </div>
+              <label class="switch" aria-label="Notification auto-archive aan/uit">
+                <input id="tgl-notification-archive" type="checkbox">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="rc-row" style="align-items:flex-start;background:#f0fdf4;margin:10px -10px;padding:10px 14px;border-radius:10px;border:1px solid #bbf7d0;">
+              <div>
+                <div class="k" style="color:#065f46;">Veiligheidsnet: bekende contacten worden nooit gearchiveerd</div>
+                <div class="s" style="color:#166534;">Heb je ooit naar iemand gereageerd of z'n mail als Priority / To Respond / Follow Up gelabeld? Dan blijven nieuwe mails van die afzender altijd in je Inbox, ook als de classifier ze als Marketing ziet.</div>
+              </div>
+            </div>
             <div class="rc-row" style="align-items:flex-start;">
               <div>
                 <div class="k">Eenmalige opruimactie</div>
-                <div class="s" id="archive-hint">Haalt alle bestaande Marketing/Notification/Ignore/Unwanted mails uit je Inbox.</div>
+                <div class="s" id="archive-hint">Haalt alle bestaande low-value mails uit je Inbox. Bekende contacten worden overgeslagen.</div>
               </div>
               <button id="btn-archive-cleanup" class="btn-scan" type="button">
                 <span class="scan-dot" aria-hidden="true"></span>
@@ -1479,16 +1577,18 @@
 
     function renderArchive(data) {
       const tgl = document.getElementById('tgl-auto-archive');
+      const tglNotif = document.getElementById('tgl-notification-archive');
       const hint = document.getElementById('archive-hint');
       if (tgl) tgl.checked = !!(data && data.auto_archive_low_value);
+      if (tglNotif) tglNotif.checked = !!(data && data.notification_auto_archive);
       if (hint) {
         const n = data && typeof data.total_in_inbox === 'number' ? data.total_in_inbox : null;
         if (n === null) {
-          hint.textContent = 'Haalt alle bestaande Marketing/Notification/Ignore/Unwanted mails uit je Inbox.';
+          hint.textContent = 'Haalt alle bestaande low-value mails uit je Inbox. Bekende contacten worden overgeslagen.';
         } else if (n === 0) {
-          hint.textContent = 'Je Inbox is al schoon — geen Marketing/Notification/Ignore/Unwanted mails gevonden.';
+          hint.textContent = 'Je Inbox is al schoon — geen low-value mails gevonden die opgeruimd moeten worden.';
         } else {
-          hint.textContent = n + ' ' + (n === 1 ? 'mail' : 'mails') + ' met Marketing/Notification/Ignore/Unwanted label staan nog in je Inbox.';
+          hint.textContent = n + ' ' + (n === 1 ? 'mail' : 'mails') + ' met low-value label staan nog in je Inbox. Bekende contacten worden overgeslagen.';
         }
       }
     }
@@ -1536,6 +1636,24 @@
         });
       }
 
+      const tglNotif = document.getElementById('tgl-notification-archive');
+      if (tglNotif) {
+        tglNotif.addEventListener('change', async (e) => {
+          const val = e.target.checked;
+          try {
+            await patchArchiveSettings({ notification_auto_archive: val });
+            showArchiveToast(val
+              ? 'Notification-mails worden nu ook automatisch gearchiveerd (bekende contacten uitgezonderd)'
+              : 'Notification-mails blijven in je Inbox'
+            );
+            await refreshArchive();
+          } catch (err) {
+            e.target.checked = !val;
+            showArchiveToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+          }
+        });
+      }
+
       const btn = document.getElementById('btn-archive-cleanup');
       if (btn) {
         btn.addEventListener('click', async () => {
@@ -1556,8 +1674,15 @@
             }
             const out = await res.json();
             const total = Number(out.total_archived || 0);
+            const skipped = Number(out.total_skipped_trusted || 0);
             if (total > 0) {
-              showArchiveToast(total + ' ' + (total === 1 ? 'mail' : 'mails') + ' uit je Inbox gehaald — blijven vindbaar via hun label');
+              let msg = total + ' ' + (total === 1 ? 'mail' : 'mails') + ' uit je Inbox gehaald';
+              if (skipped > 0) {
+                msg += ' · ' + skipped + ' ' + (skipped === 1 ? 'mail' : 'mails') + ' van bekende contacten overgeslagen';
+              }
+              showArchiveToast(msg);
+            } else if (skipped > 0) {
+              showArchiveToast(skipped + ' ' + (skipped === 1 ? 'mail' : 'mails') + ' van bekende contacten — niets gearchiveerd');
             } else {
               showArchiveToast('Je Inbox was al schoon');
             }
@@ -1570,6 +1695,82 @@
           }
         });
       }
+    }
+
+    // ============ RECENT DRAFTS ============
+    async function loadRecentDrafts(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/recent-drafts?limit=20', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (_) {
+        return { status: 'error', items: [], total: 0, confidence_counts: { high: 0, medium: 0, low: 0, unknown: 0 } };
+      }
+    }
+
+    function _confidenceDotClass(conf) {
+      if (conf === 'high') return 'rd-dot high';
+      if (conf === 'medium') return 'rd-dot medium';
+      if (conf === 'low') return 'rd-dot low';
+      return 'rd-dot'; // unknown / null → grey fallback
+    }
+
+    function _confidenceAria(conf) {
+      if (conf === 'high') return 'Zekerheid: hoog';
+      if (conf === 'medium') return 'Zekerheid: medium — quick review';
+      if (conf === 'low') return 'Zekerheid: laag — lees goed voor je stuurt';
+      return 'Zekerheid: onbekend';
+    }
+
+    function renderRecentDrafts(data) {
+      const body = document.getElementById('rd-body');
+      const items = Array.isArray(data.items) ? data.items : [];
+      const counts = data.confidence_counts || { high: 0, medium: 0, low: 0, unknown: 0 };
+
+      // Summary chips (top-right)
+      const elHigh = document.getElementById('rd-count-high');
+      const elMed  = document.getElementById('rd-count-medium');
+      const elLow  = document.getElementById('rd-count-low');
+      if (elHigh) elHigh.textContent = Number(counts.high || 0).toLocaleString('nl-NL');
+      if (elMed)  elMed.textContent  = Number(counts.medium || 0).toLocaleString('nl-NL');
+      if (elLow)  elLow.textContent  = Number(counts.low || 0).toLocaleString('nl-NL');
+
+      if (!items.length) {
+        body.innerHTML = '<div class="rd-empty">Nog geen concepten — zodra OfficeFlow een antwoord voor je klaarzet, verschijnt het hier.</div>';
+        return;
+      }
+
+      const rows = items.map(it => {
+        const subj = it.subject && it.subject.trim() ? it.subject : '(geen onderwerp)';
+        const dotClass = _confidenceDotClass(it.confidence);
+        const aria = _confidenceAria(it.confidence);
+        const when = _fmtRelTime(it.created_at);
+        const href = it.gmail_thread_url || '#';
+        const target = it.gmail_thread_url ? ' target="_blank" rel="noopener"' : '';
+        return `
+          <li>
+            <a class="rd-item" href="${escapeHtml(href)}"${target} title="${escapeHtml(subj)}">
+              <span class="${dotClass}" aria-label="${escapeHtml(aria)}" title="${escapeHtml(aria)}"></span>
+              <div class="rd-body">
+                <div class="rd-title">${escapeHtml(subj)}</div>
+                <div class="rd-meta">Concept klaargezet — klik om in Gmail te openen</div>
+              </div>
+              <span class="rd-time">${when}</span>
+            </a>
+          </li>
+        `;
+      }).join('');
+
+      body.innerHTML = `<ul class="rd-list">${rows}</ul>`;
+    }
+
+    async function refreshRecentDrafts() {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) return;
+      const data = await loadRecentDrafts(session.access_token);
+      renderRecentDrafts(data);
     }
 
     // ============ SUBSCRIPTION LOADER ============
@@ -1635,17 +1836,19 @@
       document.getElementById('welcome-title').textContent =
         firstName ? `Welkom terug, ${firstName}` : 'Welkom terug';
 
-      const [stats, subscription, radar, archive] = await Promise.all([
+      const [stats, subscription, radar, archive, recentDrafts] = await Promise.all([
         loadStats(session.access_token),
         loadSubscription(session.access_token),
         loadRadarOverview(session.access_token),
-        loadArchiveSettings(session.access_token)
+        loadArchiveSettings(session.access_token),
+        loadRecentDrafts(session.access_token)
       ]);
 
       renderStats(stats);
       renderSubscription(subscription);
       renderRadar(radar);
       renderArchive(archive);
+      renderRecentDrafts(recentDrafts);
       wireRadarControls();
       wireArchiveControls();
 
