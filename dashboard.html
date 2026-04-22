@@ -720,13 +720,17 @@
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           Follow-Up Radar
         </a></li>
-        <li><a href="#abonnement">
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>
-          Abonnement
-        </a></li>
         <li><a href="#koppeling">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
           Gmail-koppeling
+        </a></li>
+        <li><a href="#recent-drafts">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 9h8"/><path d="M8 13h6"/><path d="M8 17h4"/></svg>
+          Laatste concepten
+        </a></li>
+        <li><a href="#abonnement">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>
+          Abonnement
         </a></li>
         <li><a href="#account">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
@@ -1005,49 +1009,6 @@
         </div>
       </section>
 
-      <!-- ============ LAATSTE CONCEPTEN ============ -->
-      <section id="recent-drafts">
-        <div class="section-title">Laatste concepten</div>
-        <div class="card">
-          <div class="rd-header">
-            <div>
-              <div class="card-label">Zeker­heid per concept</div>
-              <div class="card-meta" style="margin-top:4px;">
-                Groen = AI is zeker, geel = quick check, rood = even goed lezen. Klik een rij om de Gmail-thread te openen.
-              </div>
-            </div>
-            <div class="rd-summary" id="rd-summary" aria-live="polite">
-              <span class="rd-sum-item"><span class="rd-dot high"></span><span id="rd-count-high">0</span></span>
-              <span class="rd-sum-item"><span class="rd-dot medium"></span><span id="rd-count-medium">0</span></span>
-              <span class="rd-sum-item"><span class="rd-dot low"></span><span id="rd-count-low">0</span></span>
-            </div>
-          </div>
-          <div id="rd-body">
-            <div class="rd-empty">Concepten laden…</div>
-          </div>
-          <div class="rd-legend" aria-hidden="true">
-            <span class="rd-sum-item"><span class="rd-dot high"></span>High — meestal direct te verzenden</span>
-            <span class="rd-sum-item"><span class="rd-dot medium"></span>Medium — quick review</span>
-            <span class="rd-sum-item"><span class="rd-dot low"></span>Low — lees goed voor je stuurt</span>
-          </div>
-        </div>
-      </section>
-
-      <!-- ============ ABONNEMENT ============ -->
-      <section id="abonnement">
-        <div class="section-title">Abonnement</div>
-        <div class="card">
-          <div class="card-row">
-            <div>
-              <div class="card-label">Actief plan</div>
-              <div class="card-title" id="plan-title">Mailbox Manager</div>
-              <div class="card-meta" id="plan-meta">Laden…</div>
-            </div>
-            <button class="btn-danger" id="cancel-btn">Opzeggen</button>
-          </div>
-        </div>
-      </section>
-
       <!-- ============ GMAIL ============ -->
       <section id="koppeling">
         <div class="section-title">Gmail-koppeling</div>
@@ -1109,6 +1070,49 @@
               </button>
             </div>
             <div id="archive-toast" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ LAATSTE CONCEPTEN ============ -->
+      <section id="recent-drafts">
+        <div class="section-title">Laatste concepten</div>
+        <div class="card">
+          <div class="rd-header">
+            <div>
+              <div class="card-label">Zeker­heid per concept</div>
+              <div class="card-meta" style="margin-top:4px;">
+                Groen = AI is zeker, geel = quick check, rood = even goed lezen. Klik een rij om de Gmail-thread te openen.
+              </div>
+            </div>
+            <div class="rd-summary" id="rd-summary" aria-live="polite">
+              <span class="rd-sum-item"><span class="rd-dot high"></span><span id="rd-count-high">0</span></span>
+              <span class="rd-sum-item"><span class="rd-dot medium"></span><span id="rd-count-medium">0</span></span>
+              <span class="rd-sum-item"><span class="rd-dot low"></span><span id="rd-count-low">0</span></span>
+            </div>
+          </div>
+          <div id="rd-body">
+            <div class="rd-empty">Concepten laden…</div>
+          </div>
+          <div class="rd-legend" aria-hidden="true">
+            <span class="rd-sum-item"><span class="rd-dot high"></span>High — meestal direct te verzenden</span>
+            <span class="rd-sum-item"><span class="rd-dot medium"></span>Medium — quick review</span>
+            <span class="rd-sum-item"><span class="rd-dot low"></span>Low — lees goed voor je stuurt</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ABONNEMENT ============ -->
+      <section id="abonnement">
+        <div class="section-title">Abonnement</div>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <div class="card-label">Actief plan</div>
+              <div class="card-title" id="plan-title">Mailbox Manager</div>
+              <div class="card-meta" id="plan-meta">Laden…</div>
+            </div>
+            <button class="btn-danger" id="cancel-btn">Opzeggen</button>
           </div>
         </div>
       </section>
