@@ -5952,6 +5952,256 @@ async def http_reset_awaiting_reply_nudge(
 
 
 # ---------------------------------------------------------------------------
+# SECTION I — RADAR DASHBOARD API (auth'd endpoints used by the user dashboard)
+# ---------------------------------------------------------------------------
+
+async def _radar_default_settings() -> dict[str, Any]:
+    return {
+        "radar_enabled": True,
+        "radar_grace_days": 0,
+        "silence_radar_enabled": True,
+        "silence_threshold_days": SILENCE_RADAR_DEFAULT_THRESHOLD_DAYS,
+        "last_run_at": None,
+    }
+
+
+@app.get("/api/radar/overview")
+async def radar_overview(user: dict[str, Any] = Depends(get_current_user)):
+    """
+    Consolidated payload for the dashboard Follow-Up Radar section:
+      - settings (enabled flags, threshold, last run)
+      - stats (watching counts, nudges this week, total nudges)
+      - recent_activity (last 5 nudges across both scopes, newest first)
+    Defensive: degrades to zeros + defaults if subqueries fail.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        return {
+            "settings": await _radar_default_settings(),
+            "stats": {
+                "watching_commitments": 0,
+                "watching_awaiting_replies": 0,
+                "nudges_this_week": 0,
+                "nudges_total": 0,
+            },
+            "recent_activity": [],
+            "_mailbox": False,
+        }
+
+    mailbox_id = mailbox["id"]
+    settings = {
+        "radar_enabled": bool(mailbox.get("radar_enabled", True)),
+        "radar_grace_days": int(mailbox.get("radar_grace_days") or 0),
+        "silence_radar_enabled": bool(mailbox.get("silence_radar_enabled", True)),
+        "silence_threshold_days": int(
+            mailbox.get("silence_threshold_days") or SILENCE_RADAR_DEFAULT_THRESHOLD_DAYS
+        ),
+        "last_run_at": mailbox.get("radar_last_run_at"),
+    }
+
+    now = _dt.now(_tz.utc)
+    seven_days_iso = (now - _td(days=7)).isoformat()
+
+    async def _safe_count(url: str) -> int:
+        try:
+            rows = await supabase_get(url)
+            return len(rows) if isinstance(rows, list) else 0
+        except Exception as exc:
+            print(f"[radar-overview] count failed: {repr(exc)}")
+            return 0
+
+    watching_commitments = await _safe_count(
+        f"/rest/v1/commitments?mailbox_id=eq.{mailbox_id}"
+        f"&status=eq.active&nudge_sent_at=is.null&nudge_suppressed=eq.false&select=id"
+    )
+    watching_awaiting = await _safe_count(
+        f"/rest/v1/awaiting_replies?mailbox_id=eq.{mailbox_id}"
+        f"&status=eq.active&nudge_sent_at=is.null&nudge_suppressed=eq.false&select=id"
+    )
+    nudges_week_commit = await _safe_count(
+        f"/rest/v1/commitments?mailbox_id=eq.{mailbox_id}"
+        f"&nudge_sent_at=gte.{seven_days_iso}&select=id"
+    )
+    nudges_week_await = await _safe_count(
+        f"/rest/v1/awaiting_replies?mailbox_id=eq.{mailbox_id}"
+        f"&nudge_sent_at=gte.{seven_days_iso}&select=id"
+    )
+    nudges_total_commit = await _safe_count(
+        f"/rest/v1/commitments?mailbox_id=eq.{mailbox_id}"
+        f"&nudge_sent_at=not.is.null&select=id"
+    )
+    nudges_total_await = await _safe_count(
+        f"/rest/v1/awaiting_replies?mailbox_id=eq.{mailbox_id}"
+        f"&nudge_sent_at=not.is.null&select=id"
+    )
+
+    stats = {
+        "watching_commitments": watching_commitments,
+        "watching_awaiting_replies": watching_awaiting,
+        "nudges_this_week": nudges_week_commit + nudges_week_await,
+        "nudges_total": nudges_total_commit + nudges_total_await,
+    }
+
+    # Recent activity — last 5 nudges, merged from both tables
+    recent: list[dict[str, Any]] = []
+    try:
+        commit_rows = await supabase_get(
+            f"/rest/v1/commitments?mailbox_id=eq.{mailbox_id}"
+            f"&nudge_sent_at=not.is.null"
+            f"&order=nudge_sent_at.desc&limit=5"
+            f"&select=nudge_sent_at,recipient_name,recipient_email,subject,action_text,due_date,gmail_thread_id"
+        )
+        if isinstance(commit_rows, list):
+            for r in commit_rows:
+                days_overdue = None
+                try:
+                    if r.get("due_date") and r.get("nudge_sent_at"):
+                        due = _dt.fromisoformat(str(r["due_date"])).date()
+                        nudged = _dt.fromisoformat(r["nudge_sent_at"].replace("Z", "+00:00")).date()
+                        days_overdue = max(0, (nudged - due).days)
+                except Exception:
+                    pass
+                recent.append({
+                    "type": "commitment",
+                    "at": r.get("nudge_sent_at"),
+                    "recipient_name": r.get("recipient_name"),
+                    "recipient_email": r.get("recipient_email"),
+                    "subject": r.get("subject") or r.get("action_text"),
+                    "action_text": r.get("action_text"),
+                    "days_overdue": days_overdue,
+                    "gmail_thread_id": r.get("gmail_thread_id"),
+                })
+    except Exception as exc:
+        print(f"[radar-overview] commit recent failed: {repr(exc)}")
+
+    try:
+        await_rows = await supabase_get(
+            f"/rest/v1/awaiting_replies?mailbox_id=eq.{mailbox_id}"
+            f"&nudge_sent_at=not.is.null"
+            f"&order=nudge_sent_at.desc&limit=5"
+            f"&select=nudge_sent_at,recipient_name,recipient_email,subject,last_user_sent_at,gmail_thread_id"
+        )
+        if isinstance(await_rows, list):
+            for r in await_rows:
+                days_silent = None
+                try:
+                    if r.get("last_user_sent_at") and r.get("nudge_sent_at"):
+                        sent = _dt.fromisoformat(r["last_user_sent_at"].replace("Z", "+00:00"))
+                        nudged = _dt.fromisoformat(r["nudge_sent_at"].replace("Z", "+00:00"))
+                        days_silent = max(1, (nudged - sent).days)
+                except Exception:
+                    pass
+                recent.append({
+                    "type": "silence",
+                    "at": r.get("nudge_sent_at"),
+                    "recipient_name": r.get("recipient_name"),
+                    "recipient_email": r.get("recipient_email"),
+                    "subject": r.get("subject"),
+                    "action_text": None,
+                    "days_silent": days_silent,
+                    "gmail_thread_id": r.get("gmail_thread_id"),
+                })
+    except Exception as exc:
+        print(f"[radar-overview] await recent failed: {repr(exc)}")
+
+    recent.sort(key=lambda r: r.get("at") or "", reverse=True)
+    recent = recent[:5]
+
+    return {
+        "settings": settings,
+        "stats": stats,
+        "recent_activity": recent,
+        "_mailbox": True,
+    }
+
+
+@app.patch("/api/radar/settings")
+async def radar_update_settings(
+    body: dict[str, Any] = Body(default_factory=dict),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """
+    Update radar settings for the user's mailbox.
+    Accepts any subset of:
+      radar_enabled (bool), radar_grace_days (int 0-14),
+      silence_radar_enabled (bool), silence_threshold_days (int 1-30)
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    patch: dict[str, Any] = {}
+    if "radar_enabled" in body:
+        patch["radar_enabled"] = bool(body["radar_enabled"])
+    if "radar_grace_days" in body:
+        try:
+            v = int(body["radar_grace_days"])
+            patch["radar_grace_days"] = max(0, min(14, v))
+        except Exception:
+            pass
+    if "silence_radar_enabled" in body:
+        patch["silence_radar_enabled"] = bool(body["silence_radar_enabled"])
+    if "silence_threshold_days" in body:
+        try:
+            v = int(body["silence_threshold_days"])
+            patch["silence_threshold_days"] = max(1, min(30, v))
+        except Exception:
+            pass
+
+    if not patch:
+        return {"status": "noop", "applied": {}}
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            patch,
+        )
+    except Exception as exc:
+        print(f"[radar-settings] patch failed: {repr(exc)}")
+        raise HTTPException(status_code=500, detail=f"Update mislukt: {exc}")
+
+    return {"status": "ok", "applied": patch}
+
+
+@app.post("/api/radar/run-now")
+async def radar_run_now(user: dict[str, Any] = Depends(get_current_user)):
+    """
+    Manually trigger both radar scopes for the user's mailbox.
+    Returns combined nudge counts — drafts land in Gmail, never auto-sent.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+    email = mailbox.get("email_address")
+    if not email:
+        raise HTTPException(status_code=404, detail="Mailbox mist email_address")
+
+    follow_up = await process_follow_up_radar_for_mailbox(email)
+    silence = await process_silence_radar_for_mailbox(email)
+
+    return {
+        "status": "ok",
+        "follow_up": follow_up,
+        "silence": silence,
+        "total_nudges_created": (
+            (follow_up.get("nudges_created") or 0) + (silence.get("nudges_created") or 0)
+        ),
+    }
+
+
+# ---------------------------------------------------------------------------
 # SECTION F — STARTUP HOOK (add briefing + radar loops to background tasks)
 # ---------------------------------------------------------------------------
 
