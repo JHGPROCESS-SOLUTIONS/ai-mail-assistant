@@ -4377,10 +4377,12 @@ async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
     seven_days_ago = now - timedelta(days=7)
 
     user_filter = f"user_id=eq.{quote(user_id, safe='')}"
-    month_iso = month_start.isoformat()
-    prev_month_start_iso = prev_month_start.isoformat()
-    prev_month_end_iso = month_start.isoformat()
-    seven_days_iso = seven_days_ago.isoformat()
+    # URL-encode alles — anders wordt de `+` in de tz-offset als spatie gelezen
+    # door PostgREST en faalt elke filter (count_rows geeft dan 0).
+    month_iso = quote(month_start.isoformat(), safe='')
+    prev_month_start_iso = quote(prev_month_start.isoformat(), safe='')
+    prev_month_end_iso = quote(month_start.isoformat(), safe='')
+    seven_days_iso = quote(seven_days_ago.isoformat(), safe='')
 
     async def count_rows(table: str, extra: str) -> int:
         try:
@@ -5025,7 +5027,7 @@ async def get_briefing_impact_stats(
 
     # Supabase: commitments caught in last 24h / last 7d
     try:
-        yesterday_iso = (_dt.now(_tz.utc) - _td(days=1)).isoformat()
+        yesterday_iso = quote((_dt.now(_tz.utc) - _td(days=1)).isoformat(), safe='')
         rows = await supabase_get(
             f"/rest/v1/commitments?user_id=eq.{user_id}&created_at=gte.{yesterday_iso}&select=id",
         )
@@ -5034,7 +5036,7 @@ async def get_briefing_impact_stats(
         pass
 
     try:
-        week_iso = (_dt.now(_tz.utc) - _td(days=7)).isoformat()
+        week_iso = quote((_dt.now(_tz.utc) - _td(days=7)).isoformat(), safe='')
         rows = await supabase_get(
             f"/rest/v1/commitments?user_id=eq.{user_id}&created_at=gte.{week_iso}&select=id",
         )
@@ -6103,7 +6105,7 @@ async def supabase_get_stale_awaiting_replies_for_mailbox(
     than (now - threshold_days).
     """
     try:
-        cutoff = (_dt.now(_tz.utc) - _td(days=threshold_days)).isoformat()
+        cutoff = quote((_dt.now(_tz.utc) - _td(days=threshold_days)).isoformat(), safe='')
         rows = await supabase_get(
             f"/rest/v1/awaiting_replies"
             f"?mailbox_id=eq.{mailbox_id}"
@@ -6428,7 +6430,7 @@ async def radar_overview(user: dict[str, Any] = Depends(get_current_user)):
     }
 
     now = _dt.now(_tz.utc)
-    seven_days_iso = (now - _td(days=7)).isoformat()
+    seven_days_iso = quote((now - _td(days=7)).isoformat(), safe='')
 
     async def _safe_count(url: str) -> int:
         try:
