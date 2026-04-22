@@ -168,25 +168,19 @@ TRUSTED_INDICATOR_LABELS = (
 )
 
 # -----------------------------------------------------------------------------
-# Classifier confidence (draft-triage signal).
-# Applied as a separate Gmail label on the incoming message so users can
-# triage their inbox at a glance without touching draft bodies.
-#   high   -> "AI · Sure"   (green)   — AI is confident, safe to skim + send
-#   medium -> "AI · Check"  (yellow)  — AI is reasonably sure, quick review
-#   low    -> "AI · Review" (red)     — AI is uncertain, read carefully
-# These labels are orthogonal to status labels (Priority / To Respond / ...)
-# and are NOT stripped by sync_thread_status. They DO get replaced when a
-# thread is reclassified (e.g. on reopen) so they stay current per message.
+# Classifier confidence (internal signal only — NO Gmail labels).
+# The classifier returns "high" / "medium" / "low" and we surface it in the
+# API response so the dashboard can render it later if we want. We do NOT
+# apply it as a Gmail label because that clutters the inbox, and the
+# classifier is accurate enough that the label adds more noise than value.
+#
+# CONFIDENCE_LEGACY_LABEL_NAMES lists Gmail labels previously created by
+# older builds — setup_gmail_labels_for_mailbox deletes them on the next
+# inbox run so old mails lose the tag automatically.
 # -----------------------------------------------------------------------------
 CONFIDENCE_VALUES = ("high", "medium", "low")
 
-CONFIDENCE_LABEL_BY_VALUE = {
-    "high": "AI · Sure",
-    "medium": "AI · Check",
-    "low": "AI · Review",
-}
-
-CONFIDENCE_LABEL_NAMES = tuple(CONFIDENCE_LABEL_BY_VALUE.values())
+CONFIDENCE_LEGACY_LABEL_NAMES = ("AI · Sure", "AI · Check", "AI · Review")
 
 LABEL_COLORS = {
     "Priority": {
@@ -224,19 +218,6 @@ LABEL_COLORS = {
     "Ignore": {
         "textColor": "#ffffff",
         "backgroundColor": "#822111",
-    },
-    # Confidence labels — orthogonal triage signal
-    "AI · Sure": {
-        "textColor": "#ffffff",
-        "backgroundColor": "#16a766",
-    },
-    "AI · Check": {
-        "textColor": "#000000",
-        "backgroundColor": "#f6bf26",
-    },
-    "AI · Review": {
-        "textColor": "#ffffff",
-        "backgroundColor": "#cc3a21",
     },
 }
 
@@ -2019,55 +2000,6 @@ async def sync_single_label(
     return current_label_ids
 
 
-async def sync_confidence_label(
-    user_id: str,
-    gmail_message_id: str,
-    current_label_ids: set[str],
-    label_name_to_id: dict[str, str],
-    confidence_value: str | None,
-) -> set[str]:
-    """Apply the matching AI-confidence label to a message and strip stale
-    confidence labels. Orthogonal to status labels — never touches
-    Priority / To Respond / ...
-
-    Best-effort: if Gmail rejects the modify call we log and return the
-    original label set so classification itself stays unaffected.
-    """
-    target_label_name = CONFIDENCE_LABEL_BY_VALUE.get(confidence_value or "")
-    target_label_id = label_name_to_id.get(target_label_name) if target_label_name else None
-
-    remove_label_ids: list[str] = []
-    for label_name in CONFIDENCE_LABEL_NAMES:
-        label_id = label_name_to_id.get(label_name)
-        if label_id and label_id in current_label_ids and label_id != target_label_id:
-            remove_label_ids.append(label_id)
-
-    add_label_ids: list[str] = []
-    if target_label_id and target_label_id not in current_label_ids:
-        add_label_ids.append(target_label_id)
-
-    if not add_label_ids and not remove_label_ids:
-        return current_label_ids
-
-    try:
-        await modify_gmail_message_labels(
-            user_id=user_id,
-            gmail_message_id=gmail_message_id,
-            add_label_ids=add_label_ids or None,
-            remove_label_ids=remove_label_ids or None,
-        )
-    except Exception as exc:
-        print(f"[confidence-label] msg {gmail_message_id}: {repr(exc)}")
-        return current_label_ids
-
-    updated = set(current_label_ids)
-    for label_id in remove_label_ids:
-        updated.discard(label_id)
-    for label_id in add_label_ids:
-        updated.add(label_id)
-    return updated
-
-
 async def sync_thread_status(
     user_id: str,
     thread_id: str | None,
@@ -2289,10 +2221,10 @@ async def get_thread_reply_state(
 async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
 
-    # Status labels (Priority / To Respond / ...) + confidence labels
-    # (AI · Sure / Check / Review). Confidence labels are orthogonal but we
-    # register them in the same table so label_name_to_id can resolve them.
-    for label_name in list(LABELS) + list(CONFIDENCE_LABEL_NAMES):
+    # Status labels only (Priority / To Respond / ...). Confidence is tracked
+    # internally and surfaced via the API response — no Gmail labels, to
+    # keep the inbox clean.
+    for label_name in LABELS:
         label_id = await ensure_label_exists(user_id=user_id, label_name=label_name)
 
         saved = await supabase_upsert_gmail_label(
@@ -2309,6 +2241,22 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
                 "db_row": saved,
             }
         )
+
+    # One-time cleanup of legacy AI confidence labels (AI · Sure / Check /
+    # Review). Deleting the Gmail label strips it from every message at
+    # once. Idempotent — after the first deletion every subsequent call is
+    # a no-op.
+    for legacy_name in CONFIDENCE_LEGACY_LABEL_NAMES:
+        try:
+            await delete_gmail_label_if_exists(user_id=user_id, label_name=legacy_name)
+            await supabase_delete(
+                "/rest/v1/gmail_labels"
+                f"?user_id=eq.{quote(user_id, safe='')}"
+                f"&mailbox_id=eq.{quote(mailbox_id, safe='')}"
+                f"&label_name=eq.{quote(legacy_name, safe='')}"
+            )
+        except Exception as exc:
+            print(f"[cleanup-confidence-label {legacy_name}] {repr(exc)}")
 
     return results
 
@@ -3387,21 +3335,6 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             label_name_to_id=label_name_to_id,
             target_label_name=target_label,
         )
-
-        # --- CONFIDENCE TRIAGE LABEL ---
-        # Apply AI · Sure / Check / Review on the incoming message so users
-        # can triage at a glance inside Gmail inbox. Best-effort: failures
-        # are logged but never break classification or draft generation.
-        try:
-            current_label_ids = await sync_confidence_label(
-                user_id=user["id"],
-                gmail_message_id=message_id,
-                current_label_ids=current_label_ids,
-                label_name_to_id=label_name_to_id,
-                confidence_value=classification_confidence,
-            )
-        except Exception as exc:
-            print(f"[confidence-label-hook] msg {message_id}: {repr(exc)}")
 
         # --- AUTO-ARCHIVE LOW-VALUE MAIL ---
         # Safe set (Marketing / Ignore / Unwanted) is archived by default when
