@@ -3012,6 +3012,14 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             classification_reason = classification["reason"]
             thread_status = "classified"
 
+        # --- FOLLOW-UP RADAR: close any active commitment on this thread
+        # now that an external reply has arrived ---
+        try:
+            if thread_reply_state.get("needs_response_after_reply") and latest_incoming_message is not None:
+                await mark_commitments_completed_on_reply(thread_id)
+        except Exception as exc:
+            print(f"[radar-reply-hook] Failed for thread {thread_id}: {repr(exc)}")
+
         current_label_ids = await sync_thread_status(
             user_id=user["id"],
             thread_id=thread_id,
@@ -5142,10 +5150,386 @@ async def http_briefing_settings(
 
 
 # ---------------------------------------------------------------------------
-# SECTION F — STARTUP HOOK (add briefing loop to background tasks)
+# SECTION G — FOLLOW-UP RADAR: auto-nudge on overdue commitments
+# ---------------------------------------------------------------------------
+
+FOLLOW_UP_RADAR_ENABLED_GLOBAL = os.getenv("FOLLOW_UP_RADAR_ENABLED", "true").lower() == "true"
+FOLLOW_UP_RADAR_MAX_NUDGES_PER_RUN = int(os.getenv("FOLLOW_UP_RADAR_MAX_NUDGES_PER_RUN", "10"))
+FOLLOW_UP_RADAR_RUN_HOUR = int(os.getenv("FOLLOW_UP_RADAR_RUN_HOUR", "8"))  # local time
+
+
+async def get_mailbox_radar_config(mailbox_id: str) -> dict[str, Any]:
+    try:
+        rows = await supabase_get(
+            f"/rest/v1/mailboxes?id=eq.{mailbox_id}"
+            f"&select=radar_enabled,radar_grace_days,radar_last_run_at,"
+            f"briefing_timezone,email_address",
+        )
+        return rows[0] if rows else {}
+    except Exception as exc:
+        print(f"[radar] get config failed for mailbox {mailbox_id}: {repr(exc)}")
+        return {}
+
+
+async def supabase_get_overdue_commitments_for_mailbox(
+    mailbox_id: str,
+    grace_days: int = 0,
+) -> list[dict[str, Any]]:
+    """
+    Returns active commitments whose due_date + grace_days is in the past
+    AND that have not yet been nudged AND are not suppressed.
+    """
+    try:
+        cutoff = (_date.today() - _td(days=grace_days)).isoformat()
+        rows = await supabase_get(
+            f"/rest/v1/commitments"
+            f"?mailbox_id=eq.{mailbox_id}"
+            f"&status=eq.active"
+            f"&nudge_suppressed=eq.false"
+            f"&nudge_sent_at=is.null"
+            f"&due_date=lte.{cutoff}"
+            f"&order=due_date.asc"
+            f"&select=*"
+        )
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(f"[radar] fetch overdue commitments failed for mailbox {mailbox_id}: {repr(exc)}")
+        return []
+
+
+async def supabase_mark_commitment_nudged(
+    commitment_id: str,
+    gmail_draft_id: str | None,
+) -> None:
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        await supabase_patch(
+            f"/rest/v1/commitments?id=eq.{commitment_id}",
+            {
+                "nudge_sent_at": now_iso,
+                "nudge_count": 1,
+                "nudge_draft_id": gmail_draft_id,
+                "updated_at": now_iso,
+            },
+        )
+    except Exception as exc:
+        print(f"[radar] mark-nudged failed for commitment {commitment_id}: {repr(exc)}")
+
+
+async def supabase_mark_radar_run(mailbox_id: str) -> None:
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox_id}",
+            {"radar_last_run_at": _dt.now(_tz.utc).isoformat()},
+        )
+    except Exception as exc:
+        print(f"[radar] mark-run failed for mailbox {mailbox_id}: {repr(exc)}")
+
+
+async def mark_commitments_completed_on_reply(gmail_thread_id: str) -> None:
+    """Convenience wrapper used by inbound-processing when a reply arrives."""
+    if not gmail_thread_id:
+        return
+    try:
+        await supabase_complete_commitments_for_thread(gmail_thread_id)
+    except Exception as exc:
+        print(f"[radar] complete-on-reply failed for thread {gmail_thread_id}: {repr(exc)}")
+
+
+async def generate_nudge_draft(
+    user_id: str,
+    commitment: dict[str, Any],
+) -> str:
+    """
+    Produces a short, warm nudge body. Reuses user's style profile + settings
+    via generate_ai_reply so the tone matches their normal voice.
+    """
+    recipient_name = (commitment.get("recipient_name") or "").strip()
+    recipient_email = (commitment.get("recipient_email") or "").strip()
+    action_text = (commitment.get("action_text") or "opvolgen").strip()
+    due_date = commitment.get("due_date")
+    subject = commitment.get("subject") or "Opvolging"
+
+    salutation_target = recipient_name or recipient_email or "daar"
+
+    pseudo_body = (
+        f"[INTERN NUDGE-CONTEXT — dit is GEEN echte inkomende e-mail]\n"
+        f"De gebruiker heeft eerder beloofd: '{action_text}'.\n"
+        f"Deadline was: {due_date or 'niet exact gespecificeerd'}.\n"
+        f"Er is nog geen opvolging verstuurd.\n\n"
+        f"Schrijf een korte, natuurlijke follow-up naar {salutation_target}.\n"
+        f"Richtlijnen voor deze specifieke draft:\n"
+        f"- Verontschuldig je niet overdreven; wees to-the-point.\n"
+        f"- Bevestig de belofte kort en geef een realistische nieuwe status of vraag.\n"
+        f"- Geen nieuwe harde deadlines verzinnen; vraag eventueel om een kort uitstel als dat past.\n"
+        f"- Max 4–6 zinnen.\n"
+        f"- Geen onderwerpregel."
+    )
+
+    try:
+        reply = await generate_ai_reply(
+            user_id=user_id,
+            subject=subject,
+            sender=recipient_email or recipient_name or None,
+            body_text=pseudo_body,
+        )
+        return reply or ""
+    except Exception as exc:
+        print(f"[radar] generate_nudge_draft failed: {repr(exc)}")
+        fallback = (
+            f"Hoi {recipient_name or ''},\n\n"
+            f"Ik kom even terug op {action_text.lower()}. Ik wil je hierover nog graag bijpraten — "
+            f"zou jij kunnen laten weten wat een handig moment is?\n\n"
+            f"Groet"
+        )
+        return fallback.strip()
+
+
+async def get_thread_message_headers(user_id: str, thread_id: str) -> dict[str, Any]:
+    """
+    Fetches the latest message in a thread and returns headers we need to
+    build a properly threaded reply (Message-ID + References).
+    """
+    try:
+        thread_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads/{thread_id}",
+            params={"format": "metadata", "metadataHeaders": ["Message-ID", "References", "Subject", "From", "To"]},
+        )
+        messages = thread_data.get("messages", []) or []
+        if not messages:
+            return {}
+        last = messages[-1]
+        headers = last.get("payload", {}).get("headers", []) or []
+        return {
+            "message_id_header": get_header_value(headers, "Message-ID"),
+            "references_header": get_header_value(headers, "References"),
+            "subject": get_header_value(headers, "Subject"),
+            "gmail_message_id": last.get("id"),
+            "current_label_ids": set(last.get("labelIds", []) or []),
+        }
+    except Exception as exc:
+        print(f"[radar] get_thread_message_headers failed for thread {thread_id}: {repr(exc)}")
+        return {}
+
+
+async def process_follow_up_radar_for_mailbox(email: str) -> dict[str, Any]:
+    """
+    Scans overdue commitments for this mailbox. For each:
+      1. Re-verifies the thread still needs a nudge.
+      2. Escalates thread label -> Priority.
+      3. Generates a threaded Gmail draft (no auto-send).
+      4. Persists nudge_sent_at on the commitment.
+    Idempotent — will not re-nudge a commitment that already has nudge_sent_at.
+    """
+    if not FOLLOW_UP_RADAR_ENABLED_GLOBAL:
+        return {"status": "disabled_global", "nudges_created": 0}
+
+    user = await supabase_get_user_by_email(email)
+    if not user:
+        return {"status": "no_user", "nudges_created": 0}
+
+    mailbox = await supabase_get_mailbox_by_user_and_email(user["id"], email)
+    if not mailbox:
+        return {"status": "no_mailbox", "nudges_created": 0}
+
+    config = await get_mailbox_radar_config(mailbox["id"])
+    if not config.get("radar_enabled", True):
+        return {"status": "disabled_for_mailbox", "nudges_created": 0}
+
+    grace_days = int(config.get("radar_grace_days") or 0)
+    overdue = await supabase_get_overdue_commitments_for_mailbox(
+        mailbox_id=mailbox["id"], grace_days=grace_days,
+    )
+    if not overdue:
+        await supabase_mark_radar_run(mailbox["id"])
+        return {"status": "no_overdue", "nudges_created": 0}
+
+    overdue = overdue[:FOLLOW_UP_RADAR_MAX_NUDGES_PER_RUN]
+
+    try:
+        labels = await get_all_gmail_labels(user["id"])
+        label_name_to_id = {
+            name: lbl["id"] for name, lbl in labels.items() if isinstance(lbl, dict) and "id" in lbl
+        }
+    except Exception as exc:
+        print(f"[radar] label fetch failed for {email}: {repr(exc)}")
+        label_name_to_id = {}
+
+    nudges_created = 0
+    errors: list[str] = []
+
+    for commitment in overdue:
+        try:
+            commitment_id = commitment.get("id")
+            thread_id = commitment.get("gmail_thread_id")
+            recipient_email = commitment.get("recipient_email")
+
+            if not commitment_id or not thread_id or not recipient_email:
+                errors.append(f"commitment {commitment_id}: missing thread_id or recipient_email")
+                continue
+
+            thread_info = await get_thread_message_headers(user["id"], thread_id)
+            if not thread_info:
+                errors.append(f"commitment {commitment_id}: thread fetch failed")
+                continue
+
+            if "Priority" in label_name_to_id:
+                try:
+                    await sync_thread_status(
+                        user_id=user["id"],
+                        thread_id=thread_id,
+                        current_message_id=thread_info.get("gmail_message_id") or "",
+                        current_label_ids=thread_info.get("current_label_ids") or set(),
+                        label_name_to_id=label_name_to_id,
+                        target_label_name="Priority",
+                    )
+                except Exception as exc:
+                    print(f"[radar] escalate label failed for commitment {commitment_id}: {repr(exc)}")
+
+            nudge_body = await generate_nudge_draft(user_id=user["id"], commitment=commitment)
+            if not nudge_body or len(nudge_body.strip()) < 10:
+                errors.append(f"commitment {commitment_id}: empty nudge body")
+                continue
+
+            draft_result = await create_gmail_threaded_draft(
+                user_id=user["id"],
+                to_email=recipient_email,
+                subject=thread_info.get("subject") or commitment.get("subject") or "Opvolging",
+                body=nudge_body,
+                thread_id=thread_id,
+                original_message_id_header=thread_info.get("message_id_header"),
+                references_header=thread_info.get("references_header"),
+            )
+            gmail_draft_id = (draft_result or {}).get("id")
+
+            await supabase_mark_commitment_nudged(
+                commitment_id=commitment_id,
+                gmail_draft_id=gmail_draft_id,
+            )
+            nudges_created += 1
+        except Exception as exc:
+            errors.append(f"commitment {commitment.get('id')}: {repr(exc)}")
+            print(f"[radar] per-commitment failure: {repr(exc)}")
+
+    await supabase_mark_radar_run(mailbox["id"])
+
+    return {
+        "status": "ok",
+        "email": email,
+        "candidates": len(overdue),
+        "nudges_created": nudges_created,
+        "errors": errors,
+    }
+
+
+async def radar_loop():
+    """
+    Background loop: checks every 5 min. For each mailbox whose local time has
+    crossed FOLLOW_UP_RADAR_RUN_HOUR and that has not run today, triggers the radar.
+    """
+    await asyncio.sleep(45)
+    while True:
+        try:
+            if not FOLLOW_UP_RADAR_ENABLED_GLOBAL:
+                await asyncio.sleep(300)
+                continue
+
+            mailboxes = await get_all_active_mailboxes()
+            for mailbox in mailboxes:
+                try:
+                    email = mailbox.get("email_address")
+                    if not email:
+                        continue
+                    if not mailbox.get("radar_enabled", True):
+                        continue
+
+                    tz_name = mailbox.get("briefing_timezone") or BRIEFING_DEFAULT_TIMEZONE
+                    try:
+                        now_local = _dt.now(ZoneInfo(tz_name))
+                    except Exception:
+                        now_local = _dt.now(ZoneInfo(BRIEFING_DEFAULT_TIMEZONE))
+
+                    if now_local.hour < FOLLOW_UP_RADAR_RUN_HOUR:
+                        continue
+
+                    last_run_raw = mailbox.get("radar_last_run_at")
+                    already_today = False
+                    if last_run_raw:
+                        try:
+                            last_run = _dt.fromisoformat(last_run_raw.replace("Z", "+00:00"))
+                            if last_run.astimezone(now_local.tzinfo).date() == now_local.date():
+                                already_today = True
+                        except Exception:
+                            pass
+                    if already_today:
+                        continue
+
+                    print(f"[radar] Running for {email}...")
+                    result = await process_follow_up_radar_for_mailbox(email)
+                    print(f"[radar] {email}: {result}")
+                except Exception as exc:
+                    print(f"[radar] mailbox loop failure for {mailbox.get('email_address')}: {repr(exc)}")
+        except Exception as exc:
+            print(f"[radar] loop error: {repr(exc)}")
+
+        await asyncio.sleep(300)  # 5 min cadence
+
+
+# ---------------------------------------------------------------------------
+# Internal / testing endpoints for the radar
+# ---------------------------------------------------------------------------
+
+@app.post("/internal/follow-up-radar/run")
+async def http_run_follow_up_radar(email: str = Body(..., embed=True)):
+    """Manually trigger the radar for one mailbox. Use for QA/testing."""
+    return await process_follow_up_radar_for_mailbox(email)
+
+
+@app.post("/internal/follow-up-radar/suppress")
+async def http_suppress_commitment_nudge(
+    commitment_id: str = Body(..., embed=True),
+):
+    """User can suppress nudging for a specific commitment (future UI hook)."""
+    try:
+        updated = await supabase_patch(
+            f"/rest/v1/commitments?id=eq.{commitment_id}",
+            {"nudge_suppressed": True, "updated_at": _dt.now(_tz.utc).isoformat()},
+            prefer="return=representation",
+        )
+        return {"status": "ok", "commitment": updated[0] if isinstance(updated, list) and updated else None}
+    except Exception as exc:
+        return {"status": "error", "error": repr(exc)}
+
+
+@app.post("/internal/follow-up-radar/reset")
+async def http_reset_commitment_nudge(
+    commitment_id: str = Body(..., embed=True),
+):
+    """Clear nudge state so the commitment can be nudged again on next run."""
+    try:
+        updated = await supabase_patch(
+            f"/rest/v1/commitments?id=eq.{commitment_id}",
+            {
+                "nudge_sent_at": None,
+                "nudge_count": 0,
+                "nudge_draft_id": None,
+                "nudge_suppressed": False,
+                "updated_at": _dt.now(_tz.utc).isoformat(),
+            },
+            prefer="return=representation",
+        )
+        return {"status": "ok", "commitment": updated[0] if isinstance(updated, list) and updated else None}
+    except Exception as exc:
+        return {"status": "error", "error": repr(exc)}
+
+
+# ---------------------------------------------------------------------------
+# SECTION F — STARTUP HOOK (add briefing + radar loops to background tasks)
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def start_features_background_tasks():
-    print("Features background tasks started (briefing)")
+    print("Features background tasks started (briefing + radar)")
     asyncio.create_task(briefing_loop())
+    asyncio.create_task(radar_loop())
