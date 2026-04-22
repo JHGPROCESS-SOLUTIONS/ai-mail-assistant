@@ -7225,8 +7225,28 @@ async def weekly_recap_loop():
 
 @app.post("/api/weekly-recap/run-now")
 async def http_send_weekly_recap(email: str = Body(..., embed=True)):
-    """Manual trigger for testing — sends the recap immediately regardless of day/time."""
-    return await send_weekly_recap_for_mailbox(email)
+    """Manual trigger for testing — sends the recap immediately regardless of day/time.
+
+    Wraps the send in try/except so a failure surfaces as a readable JSON
+    payload instead of a generic 500. HTTPExceptions (404/400/403 from
+    get_gmail_context_by_email / ensure_user_has_access) are re-raised so
+    FastAPI returns their real status code.
+    """
+    try:
+        return await send_weekly_recap_for_mailbox(email)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        # Surface the underlying error so we can debug from the client.
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[weekly-recap] manual trigger failed for {email}: {repr(exc)}\n{tb}")
+        return {
+            "status": "error",
+            "email": email,
+            "error_type": type(exc).__name__,
+            "error_message": str(exc),
+        }
 
 
 # ---------------------------------------------------------------------------
