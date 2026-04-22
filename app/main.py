@@ -144,6 +144,17 @@ SENT_REPLY_STATUS_LABELS = {
     "Done",
 }
 
+# Labels whose mail doesn't belong in the primary inbox.
+# When a mail is classified into one of these AND the mailbox has
+# auto_archive_low_value=true, OfficeFlow removes the INBOX label so the
+# thread disappears from Inbox but stays findable via its status label.
+LOW_VALUE_LABELS = {
+    "Marketing",
+    "Notification",
+    "Ignore",
+    "Unwanted",
+}
+
 LABEL_COLORS = {
     "Priority": {
         "textColor": "#ffffff",
@@ -1668,6 +1679,53 @@ async def modify_gmail_message_labels(
     )
 
 
+async def archive_low_value_thread(
+    user_id: str,
+    thread_id: str | None,
+    current_message_id: str,
+) -> None:
+    """Remove the Gmail INBOX label from every message in a thread.
+
+    The thread remains in All Mail and stays findable via its status label
+    (Marketing / Notification / Ignore / Unwanted). Nothing is trashed, no
+    other labels are touched. Safe to call multiple times.
+    """
+    if not thread_id:
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=current_message_id,
+                remove_label_ids=["INBOX"],
+            )
+        except Exception as exc:
+            print(f"[auto-archive] msg {current_message_id}: {repr(exc)}")
+        return
+
+    try:
+        thread_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads/{thread_id}",
+        )
+    except Exception as exc:
+        print(f"[auto-archive] thread fetch {thread_id}: {repr(exc)}")
+        return
+
+    for thread_message in thread_data.get("messages", []) or []:
+        thread_message_id = thread_message.get("id")
+        if not thread_message_id:
+            continue
+        if "INBOX" not in set(thread_message.get("labelIds", []) or []):
+            continue
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=thread_message_id,
+                remove_label_ids=["INBOX"],
+            )
+        except Exception as exc:
+            print(f"[auto-archive] msg {thread_message_id}: {repr(exc)}")
+
+
 async def ensure_label_exists(user_id: str, label_name: str) -> str:
     current_labels = await get_all_gmail_labels(user_id)
 
@@ -3126,6 +3184,23 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
             label_name_to_id=label_name_to_id,
             target_label_name=target_label,
         )
+
+        # --- AUTO-ARCHIVE LOW-VALUE MAIL ---
+        # Marketing / Notification / Ignore / Unwanted leave the primary inbox
+        # while staying findable via their status label. Toggle per mailbox.
+        try:
+            if (
+                target_label in LOW_VALUE_LABELS
+                and bool(mailbox.get("auto_archive_low_value", True))
+            ):
+                await archive_low_value_thread(
+                    user_id=user["id"],
+                    thread_id=thread_id,
+                    current_message_id=message_id,
+                )
+                current_label_ids.discard("INBOX")
+        except Exception as exc:
+            print(f"[auto-archive-hook] thread {thread_id}: {repr(exc)}")
 
         should_generate_draft = (
             LABEL_RULES[target_label]["generate_draft"]
@@ -6243,6 +6318,135 @@ async def radar_run_now(user: dict[str, Any] = Depends(get_current_user)):
         "total_nudges_created": (
             (follow_up.get("nudges_created") or 0) + (silence.get("nudges_created") or 0)
         ),
+    }
+
+
+# ---------------------------------------------------------------------------
+# SECTION I.b — AUTO-ARCHIVE LOW-VALUE MAIL (settings + one-shot cleanup)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/archive/settings")
+async def archive_get_settings(user: dict[str, Any] = Depends(get_current_user)):
+    """Current auto-archive setting + counts of Low-value mail still in Inbox."""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    # Count leftover low-value mail currently still in Inbox (best-effort).
+    in_inbox_counts: dict[str, int] = {}
+    total_in_inbox = 0
+    try:
+        for label_name in sorted(LOW_VALUE_LABELS):
+            q = f'in:inbox label:"{label_name}"'
+            data = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/messages",
+                params={"q": q, "maxResults": 500},
+            )
+            n = len(data.get("messages", []) or [])
+            in_inbox_counts[label_name] = n
+            total_in_inbox += n
+    except Exception as exc:
+        print(f"[archive-settings] inbox count failed: {repr(exc)}")
+
+    return {
+        "status": "ok",
+        "auto_archive_low_value": bool(mailbox.get("auto_archive_low_value", True)),
+        "low_value_labels": sorted(LOW_VALUE_LABELS),
+        "in_inbox_counts": in_inbox_counts,
+        "total_in_inbox": total_in_inbox,
+    }
+
+
+@app.patch("/api/archive/settings")
+async def archive_update_settings(
+    body: dict[str, Any] = Body(default_factory=dict),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Toggle auto-archive for low-value labels."""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    if "auto_archive_low_value" not in body:
+        return {"status": "noop", "applied": {}}
+
+    patch = {"auto_archive_low_value": bool(body["auto_archive_low_value"])}
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            patch,
+        )
+    except Exception as exc:
+        print(f"[archive-settings] patch failed: {repr(exc)}")
+        raise HTTPException(status_code=500, detail=f"Update mislukt: {exc}")
+
+    return {"status": "ok", "applied": patch}
+
+
+@app.post("/api/cleanup/low-value")
+async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_user)):
+    """One-shot sweep: remove INBOX from every existing low-value mail.
+    Does NOT delete anything. Mails stay in All Mail + keep their status label.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    per_label: dict[str, int] = {}
+    total_archived = 0
+    errors = 0
+
+    for label_name in sorted(LOW_VALUE_LABELS):
+        try:
+            q = f'in:inbox label:"{label_name}"'
+            data = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/messages",
+                params={"q": q, "maxResults": 500},
+            )
+        except Exception as exc:
+            print(f"[cleanup-low-value] list {label_name}: {repr(exc)}")
+            errors += 1
+            per_label[label_name] = 0
+            continue
+
+        archived = 0
+        for msg in data.get("messages", []) or []:
+            mid = msg.get("id")
+            if not mid:
+                continue
+            try:
+                await modify_gmail_message_labels(
+                    user_id=user_id,
+                    gmail_message_id=mid,
+                    remove_label_ids=["INBOX"],
+                )
+                archived += 1
+            except Exception as exc:
+                print(f"[cleanup-low-value] strip INBOX msg {mid}: {repr(exc)}")
+                errors += 1
+        per_label[label_name] = archived
+        total_archived += archived
+
+    return {
+        "status": "ok",
+        "archived_per_label": per_label,
+        "total_archived": total_archived,
+        "errors": errors,
     }
 
 
