@@ -1247,7 +1247,14 @@ async def supabase_insert_draft(
     subject: str | None,
     draft_body: str,
     status: str = "generated",
+    confidence: str | None = None,
 ) -> dict[str, Any] | None:
+    # Only persist confidence if it matches the allowed set; anything else
+    # becomes null so the DB check constraint is never violated.
+    safe_confidence: str | None = None
+    if isinstance(confidence, str) and confidence in ("high", "medium", "low"):
+        safe_confidence = confidence
+
     data = await supabase_post(
         "/rest/v1/drafts",
         [{
@@ -1257,6 +1264,7 @@ async def supabase_insert_draft(
             "subject": subject,
             "draft_body": draft_body,
             "status": status,
+            "confidence": safe_confidence,
         }],
     )
     return data[0] if isinstance(data, list) and data else data
@@ -3417,6 +3425,7 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                             subject=subject,
                             draft_body=ai_reply,
                             status="generated",
+                            confidence=classification_confidence,
                         )
                         draft_created = True
 
@@ -6681,6 +6690,96 @@ async def archive_cleanup_low_value(user: dict[str, Any] = Depends(get_current_u
         "total_archived": total_archived,
         "total_skipped_trusted": total_skipped,
         "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SECTION I.c — RECENT DRAFTS (dashboard feed with confidence dot)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/recent-drafts")
+async def api_recent_drafts(
+    limit: int = 20,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Last N drafts OfficeFlow generated for this user, newest first.
+
+    Returns a flat list ready for dashboard rendering. `confidence` may be
+    null for drafts created before the feature shipped — the UI renders a
+    neutral grey dot in that case.
+    """
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    # Clamp limit so we never pull more than 50 rows in one call.
+    if limit < 1:
+        limit = 1
+    if limit > 50:
+        limit = 50
+
+    try:
+        drafts_rows = await supabase_get(
+            "/rest/v1/drafts"
+            f"?user_id=eq.{quote(user_id, safe='')}"
+            f"&select=id,email_id,subject,confidence,status,gmail_draft_id,created_at"
+            f"&order=created_at.desc"
+            f"&limit={limit}"
+        )
+    except Exception as exc:
+        print(f"[recent-drafts] drafts fetch failed: {repr(exc)}")
+        raise HTTPException(status_code=500, detail="Kon concepten niet ophalen")
+
+    drafts_rows = drafts_rows or []
+
+    # Pull the email rows we need so we can attach thread/message ids to
+    # each draft. One batched query keeps this cheap even for limit=50.
+    email_ids = [d.get("email_id") for d in drafts_rows if d.get("email_id")]
+    emails_by_id: dict[str, dict[str, Any]] = {}
+    if email_ids:
+        in_clause = ",".join(quote(eid, safe="") for eid in email_ids)
+        try:
+            emails_rows = await supabase_get(
+                "/rest/v1/emails"
+                f"?id=in.({in_clause})"
+                f"&select=id,gmail_thread_id,gmail_message_id,subject"
+            )
+            for row in emails_rows or []:
+                emails_by_id[row["id"]] = row
+        except Exception as exc:
+            print(f"[recent-drafts] emails fetch failed: {repr(exc)}")
+
+    items: list[dict[str, Any]] = []
+    for draft in drafts_rows:
+        email_row = emails_by_id.get(draft.get("email_id") or "") or {}
+        thread_id = email_row.get("gmail_thread_id")
+        # Gmail web URL to open the thread in the user's browser.
+        gmail_thread_url = (
+            f"https://mail.google.com/mail/u/0/#all/{thread_id}"
+            if thread_id else None
+        )
+        items.append({
+            "id": draft.get("id"),
+            "subject": draft.get("subject") or email_row.get("subject") or "(geen onderwerp)",
+            "confidence": draft.get("confidence"),
+            "status": draft.get("status"),
+            "gmail_draft_id": draft.get("gmail_draft_id"),
+            "gmail_thread_id": thread_id,
+            "gmail_thread_url": gmail_thread_url,
+            "created_at": draft.get("created_at"),
+        })
+
+    # Quick counts so the dashboard can show a header like "2 check · 1 review".
+    confidence_counts = {"high": 0, "medium": 0, "low": 0, "unknown": 0}
+    for item in items:
+        bucket = item["confidence"] if item["confidence"] in ("high", "medium", "low") else "unknown"
+        confidence_counts[bucket] += 1
+
+    return {
+        "status": "ok",
+        "items": items,
+        "total": len(items),
+        "confidence_counts": confidence_counts,
     }
 
 
