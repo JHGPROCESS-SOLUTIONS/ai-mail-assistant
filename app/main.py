@@ -7119,7 +7119,7 @@ def build_weekly_recap_html(first_name: str, stats: dict[str, Any], user_email: 
 
           <p style="margin:26px 0 0 0;color:#9ca3af;font-size:12px;line-height:1.5;">
             Je ontvangt deze mail elke zaterdag. Uitschakelen kan in je
-            <a href="https://officeflowcompany.com/preferences.html" style="color:#ea580c;text-decoration:none;">voorkeuren</a>.
+            <a href="https://officeflowcompany.com/dashboard.html#account" style="color:#ea580c;text-decoration:none;">account-instellingen</a>.
           </p>
         </div>
         <div style="text-align:center;font-size:11px;color:#9ca3af;margin-top:14px;">
@@ -7223,6 +7223,53 @@ async def weekly_recap_loop():
             print(f"[weekly-recap] Loop error: {repr(exc)}")
 
         await asyncio.sleep(120)
+
+
+@app.get("/api/preferences/weekly-recap")
+async def weekly_recap_get_settings(user: dict[str, Any] = Depends(get_current_user)):
+    """Return whether the weekly recap email is enabled for the user's mailbox."""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    return {
+        "status": "ok",
+        "enabled": bool(mailbox.get("weekly_recap_enabled", True)),
+        "last_sent_at": mailbox.get("weekly_recap_last_sent_at"),
+    }
+
+
+@app.patch("/api/preferences/weekly-recap")
+async def weekly_recap_update_settings(
+    body: dict[str, Any] = Body(default_factory=dict),
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Toggle the weekly recap email on/off."""
+    user_id = user.get("id")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User id ontbreekt")
+
+    if "enabled" not in body:
+        return {"status": "noop"}
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde mailbox")
+
+    try:
+        await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            {"weekly_recap_enabled": bool(body["enabled"])},
+        )
+    except Exception as exc:
+        print(f"[weekly-recap-settings] patch failed: {repr(exc)}")
+        raise HTTPException(status_code=500, detail=f"Update mislukt: {exc}")
+
+    return {"status": "ok", "enabled": bool(body["enabled"])}
 
 
 @app.post("/api/weekly-recap/run-now")
