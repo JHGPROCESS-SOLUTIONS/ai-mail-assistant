@@ -4,6 +4,11 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Dashboard – OfficeFlow</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+  <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+  <meta name="theme-color" content="#F97316">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
@@ -11,16 +16,22 @@
     :root {
       --orange: #F97316;
       --orange-2: #EA580C;
+      --orange-soft: #fff4e6;
       --blue: #4F46E5;
       --navy: #08142f;
       --text: #0F172A;
       --text-2: #64748B;
       --text-3: #94A3B8;
       --border: #E2E8F0;
+      --border-soft: #F1F5F9;
       --bg: #F8FAFC;
       --warm: #fdfaf5;
       --green: #16a34a;
+      --green-soft: #dcfce7;
       --red: #dc2626;
+      --red-soft: #fef2f2;
+      --purple: #7c3aed;
+      --purple-soft: #ede9fe;
     }
     * { box-sizing: border-box; }
     body {
@@ -31,66 +42,268 @@
       min-height: 100vh;
     }
 
-    /* NAV */
+    /* ============ TOP NAV ============ */
     nav {
       background: #fff;
       border-bottom: 1px solid var(--border);
       padding: 14px 0;
       position: sticky;
       top: 0;
-      z-index: 10;
+      z-index: 50;
     }
     .nav-inner {
-      max-width: 1100px;
+      max-width: 1400px;
       margin: 0 auto;
-      padding: 0 24px;
+      padding: 0 28px;
       display: flex;
       justify-content: space-between;
       align-items: center;
     }
-    .logo { font-size: 18px; font-weight: 700; color: var(--navy); text-decoration: none; }
+    .logo {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 18px; font-weight: 700; color: var(--navy);
+      text-decoration: none; letter-spacing: -.01em;
+    }
+    .logo svg { flex-shrink: 0; display: block; }
+    .logo .logo-text { line-height: 1; }
     .logo .flow {
       background: linear-gradient(90deg, #F97316, #FB923C);
       -webkit-background-clip: text;
+      background-clip: text;
       -webkit-text-fill-color: transparent;
+      color: transparent;
     }
     .nav-user {
       display: flex; align-items: center; gap: 12px;
       font-size: 14px; color: var(--text-2);
     }
+    .nav-user .email-chip {
+      background: var(--orange-soft);
+      color: var(--orange-2);
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      font-weight: 600;
+    }
     .btn-ghost {
       background: transparent; border: 1.5px solid var(--border); color: var(--text-2);
       padding: 8px 14px; border-radius: 8px; font-size: 13px; font-weight: 500;
       cursor: pointer; font-family: inherit; transition: all .2s;
+      text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
     }
     .btn-ghost:hover { border-color: var(--orange); color: var(--orange); }
 
-    /* CONTENT */
-    .wrap { max-width: 900px; margin: 0 auto; padding: 48px 24px 80px; }
+    /* ============ LAYOUT ============ */
+    .layout {
+      display: flex;
+      min-height: calc(100vh - 58px);
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ============ SIDEBAR ============ */
+    .sidebar {
+      width: 280px;
+      flex-shrink: 0;
+      background: #fff;
+      border-right: 1.5px solid var(--border-soft);
+      padding: 28px 18px;
+      position: sticky;
+      top: 58px;
+      height: calc(100vh - 58px);
+      overflow-y: auto;
+    }
+    .sb-section-label {
+      font-size: 10.5px;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+      color: var(--text-3);
+      font-weight: 700;
+      padding: 0 10px;
+      margin: 0 0 10px 0;
+    }
+    .sb-nav { list-style: none; padding: 0; margin: 0 0 28px 0; }
+    .sb-nav li a {
+      display: flex; align-items: center; gap: 12px;
+      padding: 10px 12px; border-radius: 10px;
+      color: var(--text-2); font-size: 14px; font-weight: 500;
+      text-decoration: none;
+      transition: all .15s;
+    }
+    .sb-nav li a:hover { background: var(--orange-soft); color: var(--orange-2); }
+    .sb-nav li a.active {
+      background: linear-gradient(90deg, var(--orange-soft), #fffbf3);
+      color: var(--orange-2);
+      font-weight: 600;
+    }
+    .sb-nav li a svg { width: 17px; height: 17px; flex-shrink: 0; }
+
+    /* Quick stats in sidebar */
+    .sb-quick {
+      background: linear-gradient(160deg, #fff7ed 0%, #ffedd5 100%);
+      border: 1px solid #fed7aa;
+      border-radius: 14px;
+      padding: 18px 16px;
+      margin: 8px 4px 0;
+    }
+    .sb-quick-title {
+      font-size: 11px; letter-spacing: .1em; text-transform: uppercase;
+      color: var(--orange-2); font-weight: 700; margin-bottom: 10px;
+    }
+    .sb-quick-big {
+      font-size: 30px; font-weight: 800; color: var(--navy);
+      letter-spacing: -.02em; line-height: 1;
+    }
+    .sb-quick-unit { font-size: 14px; color: var(--text-2); font-weight: 600; margin-left: 4px; }
+    .sb-quick-sub {
+      font-size: 12px; color: var(--text-2); margin-top: 8px; line-height: 1.45;
+    }
+    .sb-quick-delta {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin-top: 10px; font-size: 12px; font-weight: 600;
+      color: var(--green); background: var(--green-soft);
+      padding: 3px 8px; border-radius: 999px;
+    }
+
+    /* ============ MAIN CONTENT ============ */
+    .main-content {
+      flex: 1;
+      padding: 36px 44px 80px;
+      max-width: 1120px;
+      min-width: 0;
+    }
+
+    .page-head {
+      display: flex; justify-content: space-between; align-items: flex-end;
+      flex-wrap: wrap; gap: 16px; margin-bottom: 32px;
+    }
     .eyebrow {
       display: inline-flex; align-items: center; gap: 8px;
       font-size: 12px; font-weight: 600; color: var(--orange);
-      background: #fff4e6; padding: 5px 12px; border-radius: 20px;
+      background: var(--orange-soft); padding: 5px 12px; border-radius: 20px;
       letter-spacing: .02em;
     }
     h1 { font-size: 32px; margin: 12px 0 6px; letter-spacing: -.01em; }
-    .page-desc { color: var(--text-2); font-size: 16px; margin-bottom: 40px; }
+    .page-desc { color: var(--text-2); font-size: 15px; margin: 0; max-width: 520px; line-height: 1.55; }
 
-    .section-title { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--text-3); margin: 32px 0 14px; font-weight: 700; }
+    .section-title {
+      font-size: 11px; letter-spacing: .12em; text-transform: uppercase;
+      color: var(--text-3); margin: 36px 0 14px; font-weight: 700;
+    }
 
+    /* ============ STATS GRID (hero) ============ */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 14px;
+    }
+    .stat-card {
+      background: #fff;
+      border: 1.5px solid var(--border-soft);
+      border-radius: 16px;
+      padding: 20px 20px 18px;
+      position: relative;
+      overflow: hidden;
+      transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    .stat-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 14px 40px rgba(15,23,42,.06);
+      border-color: #fed7aa;
+    }
+    .stat-icon {
+      width: 36px; height: 36px; border-radius: 10px;
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-bottom: 14px;
+    }
+    .stat-icon svg { width: 18px; height: 18px; }
+    .stat-icon.ic-orange { background: var(--orange-soft); color: var(--orange-2); }
+    .stat-icon.ic-green  { background: var(--green-soft);  color: var(--green); }
+    .stat-icon.ic-purple { background: var(--purple-soft); color: var(--purple); }
+    .stat-icon.ic-blue   { background: #e0e7ff;            color: var(--blue); }
+    .stat-label {
+      font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase;
+      color: var(--text-3); font-weight: 700; margin-bottom: 6px;
+    }
+    .stat-value {
+      font-size: 28px; font-weight: 800; letter-spacing: -.02em;
+      color: var(--navy); line-height: 1.05;
+    }
+    .stat-value .unit { font-size: 15px; color: var(--text-2); font-weight: 600; margin-left: 4px; }
+    .stat-sub { font-size: 12.5px; color: var(--text-2); margin-top: 8px; line-height: 1.5; }
+    .stat-delta {
+      display: inline-flex; align-items: center; gap: 4px;
+      margin-top: 10px;
+      font-size: 12px; font-weight: 600;
+      padding: 3px 8px; border-radius: 999px;
+    }
+    .stat-delta.up   { color: var(--green); background: var(--green-soft); }
+    .stat-delta.flat { color: var(--text-2); background: var(--border-soft); }
+
+    /* ============ ACTIVITY CHART ============ */
+    .activity-card {
+      background: #fff;
+      border: 1.5px solid var(--border-soft);
+      border-radius: 18px;
+      padding: 24px 26px 22px;
+      margin-top: 14px;
+    }
+    .activity-head {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-bottom: 20px; flex-wrap: wrap; gap: 10px;
+    }
+    .activity-head h3 {
+      font-size: 16px; margin: 0; font-weight: 700;
+    }
+    .activity-head .meta { font-size: 13px; color: var(--text-2); }
+    .activity-head .meta strong { color: var(--orange-2); font-weight: 700; }
+    .chart-wrap {
+      display: grid;
+      grid-template-columns: repeat(7, 1fr);
+      gap: 10px;
+      align-items: end;
+      height: 140px;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--border-soft);
+    }
+    .bar-col { display: flex; flex-direction: column; align-items: center; gap: 8px; height: 100%; justify-content: flex-end; }
+    .bar {
+      width: 100%;
+      background: linear-gradient(180deg, #FB923C 0%, #F97316 100%);
+      border-radius: 6px 6px 2px 2px;
+      min-height: 6px;
+      position: relative;
+      transition: opacity .15s;
+      cursor: default;
+    }
+    .bar:hover { opacity: .85; }
+    .bar-label {
+      font-size: 11px; color: var(--text-3); font-weight: 600;
+      text-transform: uppercase; letter-spacing: .03em;
+    }
+    .chart-legend {
+      display: flex; justify-content: space-between; align-items: center;
+      margin-top: 14px; font-size: 12.5px; color: var(--text-2);
+    }
+    .chart-legend .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: var(--orange); margin-right: 6px; vertical-align: middle;
+    }
+
+    /* ============ REGULAR CARDS ============ */
     .card {
       background: #fff;
       border: 1.5px solid var(--border);
       border-radius: 16px;
-      padding: 28px;
-      margin-bottom: 16px;
+      padding: 24px 26px;
+      margin-bottom: 14px;
     }
     .card-row {
       display: flex; justify-content: space-between; align-items: center;
       gap: 20px; flex-wrap: wrap;
     }
     .card-label { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--text-3); font-weight: 700; }
-    .card-title { font-size: 19px; font-weight: 700; margin-top: 4px; }
+    .card-title { font-size: 18px; font-weight: 700; margin-top: 4px; }
     .card-meta { font-size: 13px; color: var(--text-2); margin-top: 8px; line-height: 1.55; }
     .card-meta strong.cancel-warn { color: var(--red); }
 
@@ -102,18 +315,11 @@
     .status-dot.error { background: var(--red); }
 
     .btn-danger {
-      background: transparent;
-      border: 1.5px solid var(--border);
-      color: var(--text-2);
-      padding: 10px 18px;
-      border-radius: 10px;
-      font-size: 14px;
-      font-weight: 500;
-      cursor: pointer;
-      font-family: inherit;
-      transition: all .2s;
+      background: transparent; border: 1.5px solid var(--border); color: var(--text-2);
+      padding: 10px 18px; border-radius: 10px; font-size: 14px; font-weight: 500;
+      cursor: pointer; font-family: inherit; transition: all .2s;
     }
-    .btn-danger:hover { border-color: #fca5a5; color: var(--red); background: #fef2f2; }
+    .btn-danger:hover { border-color: #fca5a5; color: var(--red); background: var(--red-soft); }
 
     .btn-orange {
       background: var(--orange); color: #fff; border: none;
@@ -124,7 +330,7 @@
 
     .link-row {
       display: flex; justify-content: space-between; align-items: center;
-      padding: 14px 0; border-bottom: 1px solid var(--border);
+      padding: 14px 0; border-bottom: 1px solid var(--border-soft);
       font-size: 14px;
     }
     .link-row:last-child { border-bottom: none; }
@@ -149,7 +355,7 @@
       margin-top: 1px;
     }
 
-    /* MODAL */
+    /* ============ MODAL ============ */
     [hidden] { display: none !important; }
     .modal-overlay {
       position: fixed; inset: 0;
@@ -175,7 +381,7 @@
     .modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
     .modal-icon-ok {
       width: 48px; height: 48px; border-radius: 50%;
-      background: #dcfce7; color: var(--green);
+      background: var(--green-soft); color: var(--green);
       display: flex; align-items: center; justify-content: center;
       font-size: 24px; font-weight: 700; margin: 0 auto 16px;
     }
@@ -188,9 +394,237 @@
     .btn-danger-solid:disabled { opacity: .6; }
 
     .loading { text-align: center; padding: 80px 20px; color: var(--text-2); }
-    @media (max-width: 600px) {
-      h1 { font-size: 26px; }
-      .card { padding: 22px; }
+
+    /* ============ RESPONSIVE ============ */
+    @media (max-width: 1100px) {
+      .stats-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 900px) {
+      .layout { flex-direction: column; }
+      .sidebar {
+        width: 100%;
+        height: auto;
+        position: static;
+        border-right: none;
+        border-bottom: 1.5px solid var(--border-soft);
+        padding: 20px 20px 12px;
+      }
+      .sb-quick { margin-top: 4px; }
+      .main-content { padding: 28px 24px 80px; }
+    }
+    @media (max-width: 640px) {
+      .nav-inner { padding: 0 16px; gap: 10px; }
+      .logo { font-size: 16px; }
+      .nav-user { gap: 8px; }
+      .nav-user .email-chip {
+        max-width: 140px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .btn-ghost { padding: 7px 10px; font-size: 12px; }
+      .sidebar { padding: 16px 16px 10px; }
+      .sb-nav { margin-bottom: 18px; display: flex; flex-wrap: wrap; gap: 4px; }
+      .sb-nav li { flex: 1 0 auto; }
+      .sb-nav li a { padding: 9px 10px; font-size: 13.5px; }
+      .main-content { padding: 20px 16px 60px; }
+      .page-head { gap: 10px; margin-bottom: 22px; }
+      h1 { font-size: 24px; margin-top: 8px; }
+      .page-desc { font-size: 14px; }
+      .section-title { margin: 26px 0 10px; }
+      .stats-grid { grid-template-columns: 1fr; gap: 10px; }
+      .card, .activity-card { padding: 18px 16px; border-radius: 14px; }
+      .stat-card { padding: 16px 16px 14px; border-radius: 14px; }
+      .stat-value { font-size: 24px; }
+      .chart-wrap { height: 100px; gap: 6px; }
+    }
+    @media (max-width: 380px) {
+      .nav-user .email-chip { display: none; }
+    }
+
+    /* ===== FOLLOW-UP RADAR — wow block ===== */
+    .radar-card {
+      position: relative;
+      overflow: hidden;
+      border-radius: 18px;
+      padding: 22px 24px;
+      background:
+        radial-gradient(1200px 280px at 10% -20%, rgba(249,115,22,.10), transparent 60%),
+        radial-gradient(900px 240px at 110% 0%, rgba(234,88,12,.08), transparent 55%),
+        linear-gradient(180deg, #fffdf9 0%, #ffffff 100%);
+      border: 1px solid #fed7aa;
+      box-shadow: 0 1px 2px rgba(17,24,39,.03), 0 10px 32px -12px rgba(234,88,12,.18);
+    }
+    .radar-card::before{
+      content:"";
+      position:absolute; inset:-1px;
+      border-radius:inherit;
+      background: conic-gradient(from 0deg, rgba(249,115,22,.28), transparent 30%, transparent 70%, rgba(249,115,22,.28));
+      filter: blur(24px);
+      opacity:.35;
+      pointer-events:none;
+      z-index:0;
+    }
+    .radar-card > * { position: relative; z-index:1; }
+
+    .radar-head {
+      display:flex; align-items:flex-start; justify-content:space-between;
+      gap:14px; flex-wrap:wrap;
+    }
+    .radar-head .title-block { min-width: 0; }
+    .radar-head h3 {
+      margin:0; font-size: 22px; font-weight: 800; letter-spacing:-.015em;
+      display:flex; align-items:center; gap:10px;
+    }
+    .radar-head .radar-icon {
+      width:36px; height:36px; border-radius:10px;
+      background: linear-gradient(135deg, var(--orange), var(--orange-2));
+      color:#fff; display:inline-flex; align-items:center; justify-content:center;
+      box-shadow: 0 6px 18px -6px rgba(249,115,22,.55);
+    }
+    .radar-head .sub {
+      font-size: 14px; color: var(--text-2); margin-top: 6px; line-height: 1.55;
+      max-width: 560px;
+    }
+    .radar-live {
+      display:inline-flex; align-items:center; gap:8px;
+      padding:6px 12px; border-radius: 999px;
+      background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;
+      font-size:12px; font-weight: 800; letter-spacing:.03em;
+      text-transform:uppercase;
+    }
+    .radar-live.paused { background:#f3f4f6; color:#374151; border-color:#e5e7eb; }
+    .radar-live .pulse {
+      width:8px; height:8px; border-radius:50%;
+      background:#10b981; box-shadow:0 0 0 0 rgba(16,185,129,.6);
+      animation: radar-pulse 1.8s infinite;
+    }
+    .radar-live.paused .pulse { background:#9ca3af; animation:none; }
+    @keyframes radar-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(16,185,129,.55); }
+      70%  { box-shadow: 0 0 0 10px rgba(16,185,129,0); }
+      100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); }
+    }
+
+    .radar-stats {
+      display:grid; grid-template-columns: repeat(4, 1fr); gap:12px;
+      margin-top:20px;
+    }
+    .radar-stat {
+      background:#ffffffcc; backdrop-filter: blur(6px);
+      border:1px solid #f1d2b5; border-radius:14px;
+      padding:14px 14px 12px;
+    }
+    .radar-stat .k { font-size:11px; letter-spacing:.08em; text-transform:uppercase; color:var(--text-3); font-weight:800; }
+    .radar-stat .v { font-size:28px; font-weight:800; letter-spacing:-.02em; margin-top:4px; color:#111827; }
+    .radar-stat .s { font-size:12px; color:var(--text-2); margin-top:2px; }
+    @media (max-width: 760px){ .radar-stats { grid-template-columns: repeat(2, 1fr); } }
+
+    .radar-modes {
+      display:grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap:14px; margin-top:18px;
+    }
+    .radar-mode {
+      background:#fff; border:1px solid #fee7d0; border-radius:14px;
+      padding:14px 16px; transition: transform .18s ease, box-shadow .18s ease, border-color .18s ease;
+    }
+    .radar-mode:hover { transform: translateY(-2px); border-color:#fed7aa; box-shadow:0 10px 24px -14px rgba(234,88,12,.25); }
+    .radar-mode .mh { display:flex; align-items:center; gap:8px; margin-bottom:6px; }
+    .radar-mode .mh strong { font-size:14px; color:#1f2937; }
+    .radar-mode .mh svg { color:var(--orange-2); }
+    .radar-mode p { font-size:13px; color:#4b5563; line-height:1.6; margin:0; }
+
+    .radar-controls {
+      margin-top:20px; padding-top:18px; border-top:1px dashed #fed7aa;
+      display:grid; grid-template-columns: 1fr auto; gap:16px; align-items:start;
+    }
+    @media (max-width: 720px){ .radar-controls { grid-template-columns: 1fr; } }
+    .rc-row {
+      display:flex; align-items:center; justify-content:space-between;
+      gap:14px; padding:10px 0;
+    }
+    .rc-row + .rc-row { border-top:1px solid #fff0df; }
+    .rc-row .k { font-size:13px; font-weight:600; color:#1f2937; }
+    .rc-row .s { font-size:12px; color:var(--text-3); display:block; margin-top:2px; font-weight:500; }
+
+    /* Toggle switch */
+    .switch { position:relative; display:inline-block; width:44px; height:24px; flex:none; }
+    .switch input { opacity:0; width:0; height:0; }
+    .switch .slider {
+      position:absolute; cursor:pointer; inset:0;
+      background:#e5e7eb; transition: .2s; border-radius:999px;
+    }
+    .switch .slider::before {
+      content:""; position:absolute; height:18px; width:18px; left:3px; top:3px;
+      background:#fff; border-radius:50%; transition: .2s; box-shadow:0 2px 4px rgba(0,0,0,.15);
+    }
+    .switch input:checked + .slider { background: linear-gradient(135deg, var(--orange), var(--orange-2)); }
+    .switch input:checked + .slider::before { transform: translateX(20px); }
+    .switch input:disabled + .slider { opacity:.5; cursor:not-allowed; }
+
+    /* Threshold chips */
+    .chip-group { display:inline-flex; gap:6px; flex-wrap:wrap; }
+    .chip {
+      border:1px solid #fed7aa; background:#fff; color:#9a3412;
+      padding:6px 10px; border-radius:999px; font-size:12px; font-weight:700;
+      cursor:pointer; transition: all .15s ease;
+    }
+    .chip:hover { background: var(--orange-soft); }
+    .chip.active { background: linear-gradient(135deg, var(--orange), var(--orange-2)); color:#fff; border-color: var(--orange-2); }
+
+    .radar-actions { display:flex; flex-direction:column; gap:10px; align-items:flex-end; }
+    .btn-scan {
+      background: linear-gradient(135deg, var(--orange), var(--orange-2)); color:#fff;
+      border:none; padding:10px 18px; border-radius:10px;
+      font-size:14px; font-weight:700; letter-spacing:.01em;
+      cursor:pointer; display:inline-flex; align-items:center; gap:8px;
+      box-shadow: 0 8px 22px -8px rgba(234,88,12,.55);
+      transition: transform .12s ease, box-shadow .12s ease, opacity .12s ease;
+    }
+    .btn-scan:hover { transform: translateY(-1px); box-shadow: 0 12px 28px -10px rgba(234,88,12,.7); }
+    .btn-scan:disabled { opacity:.6; cursor:not-allowed; transform:none; }
+    .btn-scan .scan-dot {
+      width:8px; height:8px; border-radius:50%; background:#fff;
+      animation: radar-pulse 1.4s infinite;
+    }
+    .scan-hint { font-size:12px; color:var(--text-3); }
+
+    .radar-activity { margin-top:20px; }
+    .radar-activity h4 {
+      font-size:12px; letter-spacing:.08em; text-transform:uppercase;
+      color:var(--text-3); font-weight:800; margin:0 0 10px;
+    }
+    .ra-empty {
+      font-size:13px; color:var(--text-3);
+      background:#fffaf3; border:1px dashed #fed7aa; border-radius:12px;
+      padding:14px 16px;
+    }
+    .ra-list { display:flex; flex-direction:column; gap:8px; }
+    .ra-item {
+      display:flex; gap:12px; align-items:flex-start;
+      padding:12px 14px; border:1px solid #f3e6d4; border-radius:12px; background:#fff;
+    }
+    .ra-kind {
+      width:28px; height:28px; border-radius:8px; flex:none;
+      background:var(--orange-soft); color:var(--orange-2);
+      display:inline-flex; align-items:center; justify-content:center;
+    }
+    .ra-kind.silence { background:#eef2ff; color:#4338ca; }
+    .ra-body { min-width:0; flex:1; }
+    .ra-title { font-size:14px; font-weight:700; color:#111827; line-height:1.35; }
+    .ra-meta  { font-size:12px; color:var(--text-2); margin-top:2px; }
+    .ra-time  { font-size:11px; color:var(--text-3); font-weight:600; white-space:nowrap; }
+
+    .radar-toast {
+      margin-top:14px; padding:10px 14px; border-radius:10px;
+      font-size:13px; font-weight:600;
+      background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0;
+      animation: radar-fadein .25s ease-out;
+    }
+    .radar-toast.error { background:#fef2f2; color:#991b1b; border-color:#fecaca; }
+    @keyframes radar-fadein {
+      from { opacity:0; transform: translateY(-4px); }
+      to   { opacity:1; transform: translateY(0); }
     }
   </style>
 </head>
@@ -198,74 +632,413 @@
 
   <nav>
     <div class="nav-inner">
-      <a href="/" class="logo">Office<span class="flow">Flow</span></a>
+      <a href="/" class="logo" aria-label="OfficeFlow">
+        <svg viewBox="0 0 48 48" width="26" height="26" aria-hidden="true">
+          <defs><linearGradient id="of-dash-mark" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#F97316"/><stop offset="100%" stop-color="#FB923C"/></linearGradient></defs>
+          <rect width="48" height="48" rx="11" fill="url(#of-dash-mark)"/>
+          <circle cx="24" cy="24" r="11" fill="none" stroke="#fff" stroke-width="3.2"/>
+          <path d="M21.5 19.5 L28 24 L21.5 28.5" fill="none" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="logo-text">Office<span class="flow">Flow</span></span>
+      </a>
       <div class="nav-user">
-        <span id="user-email">—</span>
+        <span class="email-chip" id="user-email">—</span>
         <button class="btn-ghost" id="logout-btn">Uitloggen</button>
       </div>
     </div>
   </nav>
 
-  <div class="wrap" id="page-content" style="display:none;">
-    <div class="eyebrow">Dashboard</div>
-    <h1>Welkom terug</h1>
-    <p class="page-desc">Beheer je abonnement, koppelingen en voorkeuren.</p>
+  <div class="layout" id="page-content" style="display:none;">
 
-    <!-- Subscription card -->
-    <div class="section-title">Abonnement</div>
-    <div class="card">
-      <div class="card-row">
-        <div>
-          <div class="card-label">Actief plan</div>
-          <div class="card-title" id="plan-title">Mailbox Manager</div>
-          <div class="card-meta" id="plan-meta">Laden…</div>
-        </div>
-        <button class="btn-danger" id="cancel-btn">Opzeggen</button>
+    <!-- ============ SIDEBAR ============ -->
+    <aside class="sidebar">
+      <div class="sb-section-label">Menu</div>
+      <ul class="sb-nav">
+        <li><a href="#overzicht" class="active">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Overzicht
+        </a></li>
+        <li><a href="#statistieken">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 5-5"/></svg>
+          Statistieken
+        </a></li>
+        <li><a href="#radar">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          Follow-Up Radar
+        </a></li>
+        <li><a href="#abonnement">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 10h18"/></svg>
+          Abonnement
+        </a></li>
+        <li><a href="#koppeling">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+          Gmail-koppeling
+        </a></li>
+        <li><a href="#account">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/></svg>
+          Account
+        </a></li>
+        <li><a href="mailto:mail@officeflowcompany.com">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          Support
+        </a></li>
+      </ul>
+
+      <div class="sb-section-label">Deze maand</div>
+      <div class="sb-quick">
+        <div class="sb-quick-title">Tijd bespaard</div>
+        <div><span class="sb-quick-big" id="sb-time">—</span><span class="sb-quick-unit" id="sb-time-unit"></span></div>
+        <div class="sb-quick-sub" id="sb-time-sub">Gebaseerd op concepten + spamfilter.</div>
+        <span class="sb-quick-delta" id="sb-delta" hidden>↑ <span id="sb-delta-val"></span>% vs vorige maand</span>
       </div>
-    </div>
+    </aside>
 
-    <!-- Gmail connection -->
-    <div class="section-title">Gmail-koppeling</div>
-    <div class="card">
-      <div class="card-row">
-        <div>
-          <div class="card-label">Status</div>
-          <div class="card-title" id="gmail-status">
-            <span class="status-dot"></span>Verbonden
+    <!-- ============ MAIN ============ -->
+    <main class="main-content">
+      <section id="overzicht">
+        <div class="page-head">
+          <div>
+            <div class="eyebrow">Dashboard</div>
+            <h1 id="welcome-title">Welkom terug</h1>
+            <p class="page-desc">Zo heeft OfficeFlow je inbox deze maand geholpen. Blijf zelf in controle — elk antwoord kies je zelf.</p>
           </div>
-          <div class="card-meta" id="gmail-email">—</div>
+          <a class="btn-orange" href="https://mail.google.com" target="_blank" rel="noopener" style="text-decoration:none;">Open Gmail →</a>
         </div>
-        <a class="btn-ghost" href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Beheer bij Google</a>
-      </div>
-      <div class="gmail-only-notice" role="note">
-        <span class="gmail-only-icon" aria-hidden="true">!</span>
-        <div>
-          <strong>Werk in Gmail, niet in Apple Mail of Outlook.</strong>
-          AI-concepten verschijnen in de Gmail-thread met een verzendknop. In andere e-mailclients (Apple Mail, Outlook, Thunderbird) tonen labels geen kleuren en kun je concepten niet vanuit de thread versturen. Open <a href="https://mail.google.com" target="_blank" rel="noopener">mail.google.com</a> of gebruik de officiële Gmail-app op je telefoon.
-        </div>
-      </div>
-    </div>
+      </section>
 
-    <!-- Account -->
-    <div class="section-title">Account</div>
-    <div class="card">
-      <div class="link-row">
-        <span>Wachtwoord wijzigen</span>
-        <a href="/reset-password.html">Wijzig →</a>
-      </div>
-      <div class="link-row">
-        <span>Privacybeleid</span>
-        <a href="/privacy.html">Bekijk →</a>
-      </div>
-      <div class="link-row">
-        <span>Algemene voorwaarden</span>
-        <a href="/terms.html">Bekijk →</a>
-      </div>
-      <div class="link-row">
-        <span>Support</span>
-        <a href="mailto:mail@officeflowcompany.com">mail@officeflowcompany.com</a>
-      </div>
-    </div>
+      <!-- ============ HERO STATS ============ -->
+      <section id="statistieken">
+        <div class="section-title">Jouw impact</div>
+        <div class="stats-grid">
+
+          <div class="stat-card">
+            <div class="stat-icon ic-orange">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
+            </div>
+            <div class="stat-label">Tijd bespaard</div>
+            <div class="stat-value"><span id="stat-time">—</span><span class="unit" id="stat-time-unit"></span></div>
+            <div class="stat-sub">Concepten, sorteren en spamfilter.</div>
+            <span class="stat-delta up" id="stat-time-delta" hidden>↑ <span></span>% vs vorige maand</span>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon ic-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M9 14l2 2 4-4"/></svg>
+            </div>
+            <div class="stat-label">Concepten klaar</div>
+            <div class="stat-value"><span id="stat-drafts">—</span></div>
+            <div class="stat-sub">AI-voorstellen wachtend in je Gmail-threads.</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon ic-purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 7h18M3 12h18M3 17h18"/></svg>
+            </div>
+            <div class="stat-label">Mails geordend</div>
+            <div class="stat-value"><span id="stat-classified">—</span></div>
+            <div class="stat-sub">Automatisch gelabeld en gesorteerd.</div>
+          </div>
+
+          <div class="stat-card">
+            <div class="stat-icon ic-blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2l9 4v6c0 5-4 9-9 10-5-1-9-5-9-10V6z"/><path d="M9 12l2 2 4-4"/></svg>
+            </div>
+            <div class="stat-label">Priority niet gemist</div>
+            <div class="stat-value"><span id="stat-priority">—</span><span class="unit">%</span></div>
+            <div class="stat-sub">Belangrijke mails gemarkeerd binnen 5 min.</div>
+          </div>
+
+        </div>
+
+        <!-- Activity chart -->
+        <div class="activity-card">
+          <div class="activity-head">
+            <div>
+              <h3>Activiteit deze week</h3>
+              <div class="meta">Aantal mails dat OfficeFlow voor je verwerkte — <strong id="week-total">—</strong> totaal</div>
+            </div>
+            <div class="meta"><span class="dot"></span>Verwerkte mails</div>
+          </div>
+          <div class="chart-wrap" id="chart"></div>
+          <div class="chart-legend">
+            <span>Laatste 7 dagen</span>
+            <span id="chart-note">—</span>
+          </div>
+        </div>
+
+        <!-- Secondary stats row -->
+        <div class="stats-grid" style="margin-top: 14px;">
+          <div class="stat-card">
+            <div class="stat-icon ic-green">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 12l-4-4v3H9v2h9v3z"/><path d="M12 20H4V4h8"/></svg>
+            </div>
+            <div class="stat-label">Snel gereageerd</div>
+            <div class="stat-value"><span id="stat-fast">—</span><span class="unit">%</span></div>
+            <div class="stat-sub">Binnen 4 uur beantwoord.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon ic-orange">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M6 6l1 14a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-14"/></svg>
+            </div>
+            <div class="stat-label">Spam gefilterd</div>
+            <div class="stat-value"><span id="stat-spam">—</span></div>
+            <div class="stat-sub">Marketing + notificaties uit je weg gehouden.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon ic-purple">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/></svg>
+            </div>
+            <div class="stat-label">Follow-up actief</div>
+            <div class="stat-value"><span id="stat-followup">—</span></div>
+            <div class="stat-sub">Mails die nog een actie van jou vragen.</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-icon ic-blue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 8v4l2 2"/></svg>
+            </div>
+            <div class="stat-label">Wachten op reply</div>
+            <div class="stat-value"><span id="stat-waiting">—</span></div>
+            <div class="stat-sub">Externe reactie wordt nog verwacht.</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ FOLLOW-UP RADAR ============ -->
+      <section id="radar">
+        <div class="section-title">Follow-Up Radar</div>
+
+        <div class="radar-card" id="radar-card">
+          <!-- HEADER -->
+          <div class="radar-head">
+            <div class="title-block">
+              <h3>
+                <span class="radar-icon" aria-hidden="true">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                </span>
+                Follow-Up Radar
+              </h3>
+              <div class="sub">
+                OfficeFlow scant je inbox elke ochtend op <strong>open beloftes</strong> en <strong>stille threads</strong>. Als iets blijft liggen, verschijnt er een opvolg-concept in de bestaande Gmail-thread. Jij blijft de knop die verzendt.
+              </div>
+            </div>
+            <span class="radar-live" id="radar-live-badge">
+              <span class="pulse"></span>
+              <span id="radar-live-text">Live</span>
+            </span>
+          </div>
+
+          <!-- STATS STRIP -->
+          <div class="radar-stats" role="list">
+            <div class="radar-stat" role="listitem">
+              <div class="k">In beeld — beloftes</div>
+              <div class="v" id="rs-commitments">—</div>
+              <div class="s">Open beloftes die de radar bewaakt</div>
+            </div>
+            <div class="radar-stat" role="listitem">
+              <div class="k">In beeld — stille threads</div>
+              <div class="v" id="rs-waiting">—</div>
+              <div class="s">Waiting On Reply, klok loopt</div>
+            </div>
+            <div class="radar-stat" role="listitem">
+              <div class="k">Nudges deze week</div>
+              <div class="v" id="rs-week">—</div>
+              <div class="s">Opvolg-concepten gemaakt</div>
+            </div>
+            <div class="radar-stat" role="listitem">
+              <div class="k">Nudges totaal</div>
+              <div class="v" id="rs-total">—</div>
+              <div class="s">Sinds je account gekoppeld is</div>
+            </div>
+          </div>
+
+          <!-- MODE CARDS -->
+          <div class="radar-modes">
+            <div class="radar-mode">
+              <div class="mh">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <strong>Belofte-radar</strong>
+              </div>
+              <p>Beloof je iets ("ik stuur je morgen de offerte"), dan onthoudt OfficeFlow de deadline. Loopt die af zonder actie, dan escaleert de thread naar <strong>Priority</strong> en ligt er een opvolg-concept klaar in jouw stijl.</p>
+            </div>
+            <div class="radar-mode">
+              <div class="mh">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+                <strong>Stilte-radar</strong>
+              </div>
+              <p>Wacht je al een tijd op een reactie (label <em>Waiting On Reply</em>), dan verschijnt er na jouw drempel een vriendelijke herinnering als concept in dezelfde thread. Niks wordt automatisch verzonden.</p>
+            </div>
+          </div>
+
+          <!-- CONTROLS -->
+          <div class="radar-controls">
+            <div>
+              <div class="rc-row">
+                <div>
+                  <div class="k">Belofte-radar</div>
+                  <span class="s">Bewaakt beloftes uit verzonden mail en escaleert bij overschrijding.</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="tgl-radar-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="rc-row">
+                <div>
+                  <div class="k">Grace-periode voor beloftes</div>
+                  <span class="s">Dagen na de deadline voordat er een opvolg-concept komt.</span>
+                </div>
+                <div class="chip-group" id="chips-grace" role="radiogroup" aria-label="Grace-periode">
+                  <button class="chip" type="button" data-val="0">0d</button>
+                  <button class="chip" type="button" data-val="1">1d</button>
+                  <button class="chip" type="button" data-val="2">2d</button>
+                  <button class="chip" type="button" data-val="3">3d</button>
+                  <button class="chip" type="button" data-val="7">7d</button>
+                </div>
+              </div>
+              <div class="rc-row">
+                <div>
+                  <div class="k">Stilte-radar</div>
+                  <span class="s">Stuurt een vriendelijke herinnering voor threads waar je op reactie wacht.</span>
+                </div>
+                <label class="switch">
+                  <input type="checkbox" id="tgl-silence-enabled">
+                  <span class="slider"></span>
+                </label>
+              </div>
+              <div class="rc-row">
+                <div>
+                  <div class="k">Drempel stilte-radar</div>
+                  <span class="s">Dagen zonder reactie voordat er een bump-concept komt.</span>
+                </div>
+                <div class="chip-group" id="chips-silence" role="radiogroup" aria-label="Stilte-drempel">
+                  <button class="chip" type="button" data-val="3">3d</button>
+                  <button class="chip" type="button" data-val="5">5d</button>
+                  <button class="chip" type="button" data-val="7">7d</button>
+                  <button class="chip" type="button" data-val="10">10d</button>
+                  <button class="chip" type="button" data-val="14">14d</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="radar-actions">
+              <button class="btn-scan" id="btn-radar-scan" type="button">
+                <span class="scan-dot" aria-hidden="true"></span>
+                <span id="btn-radar-scan-label">Scan nu</span>
+              </button>
+              <span class="scan-hint" id="radar-last-run">Automatisch elke ochtend om 07:00</span>
+            </div>
+          </div>
+
+          <!-- TOAST -->
+          <div id="radar-toast" hidden></div>
+
+          <!-- ACTIVITY FEED -->
+          <div class="radar-activity">
+            <h4>Laatste nudges</h4>
+            <div id="radar-activity-body">
+              <div class="ra-empty">Nog geen nudges — de radar staat scherp. Zodra er iets blijft liggen, zie je het hier verschijnen.</div>
+            </div>
+          </div>
+
+          <!-- Footer note -->
+          <div class="gmail-only-notice" role="note" style="margin-top:18px;">
+            <span class="gmail-only-icon" aria-hidden="true">!</span>
+            <div>
+              <strong>Jij blijft de knop.</strong>
+              Opvolg-concepten worden nooit automatisch verzonden. Ze verschijnen in de bestaande Gmail-thread en veranderen niks aan de status totdat jij verzendt.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ABONNEMENT ============ -->
+      <section id="abonnement">
+        <div class="section-title">Abonnement</div>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <div class="card-label">Actief plan</div>
+              <div class="card-title" id="plan-title">Mailbox Manager</div>
+              <div class="card-meta" id="plan-meta">Laden…</div>
+            </div>
+            <button class="btn-danger" id="cancel-btn">Opzeggen</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ GMAIL ============ -->
+      <section id="koppeling">
+        <div class="section-title">Gmail-koppeling</div>
+        <div class="card">
+          <div class="card-row">
+            <div>
+              <div class="card-label">Status</div>
+              <div class="card-title" id="gmail-status">
+                <span class="status-dot"></span>Verbonden
+              </div>
+              <div class="card-meta" id="gmail-email">—</div>
+            </div>
+            <a class="btn-ghost" href="https://myaccount.google.com/permissions" target="_blank" rel="noopener">Beheer bij Google</a>
+          </div>
+          <div class="gmail-only-notice" role="note">
+            <span class="gmail-only-icon" aria-hidden="true">!</span>
+            <div>
+              <strong>Werk in Gmail zelf.</strong>
+              Conceptantwoorden verschijnen direct in de Gmail-thread met een verzendknop. Open <a href="https://mail.google.com" target="_blank" rel="noopener">mail.google.com</a> of gebruik de officiële Gmail-app op je telefoon.
+            </div>
+          </div>
+
+          <!-- AUTO-ARCHIVE LOW-VALUE MAIL -->
+          <div class="archive-wrap" style="margin-top:18px;padding:16px 18px;background:#fffaf3;border:1px solid #fed7aa;border-radius:14px;">
+            <div class="rc-row">
+              <div>
+                <div class="k">Marketing &amp; ruis uit je Inbox halen</div>
+                <div class="s">Mails met label Marketing, Notification, Ignore of Unwanted verlaten je primaire Inbox en blijven vindbaar via hun label. Niets wordt verwijderd.</div>
+              </div>
+              <label class="switch" aria-label="Auto-archive low-value aan/uit">
+                <input id="tgl-auto-archive" type="checkbox">
+                <span class="slider"></span>
+              </label>
+            </div>
+            <div class="rc-row" style="align-items:flex-start;">
+              <div>
+                <div class="k">Eenmalige opruimactie</div>
+                <div class="s" id="archive-hint">Haalt alle bestaande Marketing/Notification/Ignore/Unwanted mails uit je Inbox.</div>
+              </div>
+              <button id="btn-archive-cleanup" class="btn-scan" type="button">
+                <span class="scan-dot" aria-hidden="true"></span>
+                <span>Maak Inbox schoon</span>
+              </button>
+            </div>
+            <div id="archive-toast" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ ACCOUNT ============ -->
+      <section id="account">
+        <div class="section-title">Account</div>
+        <div class="card">
+          <div class="link-row">
+            <span>Wachtwoord wijzigen</span>
+            <a href="/reset-password.html">Wijzig →</a>
+          </div>
+          <div class="link-row">
+            <span>Privacybeleid</span>
+            <a href="/privacy.html">Bekijk →</a>
+          </div>
+          <div class="link-row">
+            <span>Algemene voorwaarden</span>
+            <a href="/terms.html">Bekijk →</a>
+          </div>
+          <div class="link-row">
+            <span>Support</span>
+            <a href="mailto:mail@officeflowcompany.com">mail@officeflowcompany.com</a>
+          </div>
+        </div>
+      </section>
+
+    </main>
   </div>
 
   <div class="loading" id="loading">Laden…</div>
@@ -314,26 +1087,505 @@
   <script>
     const SUPABASE_URL = 'https://lvjdqpklkueajxzznaqq.supabase.co';
     const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imx2amRxcGtsa3VlYWp4enpuYXFxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQxODc5MTMsImV4cCI6MjA4OTc2MzkxM30.vnUBZpET7spcQ0oIhSwSFeZZdw1F2WYcYul2lbyotsk';
-    const API_BASE = 'https://api.officeflowcompany.com'; // jouw FastAPI backend
+    const API_BASE = 'https://api.officeflowcompany.com';
     const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-    // Auth guard + load data
-    (async () => {
-      const { data: { session } } = await sb.auth.getSession();
-      if (!session) {
-        window.location.href = '/login.html';
-        return;
+    // ============ HELPERS ============
+    function formatTimeSaved(minutes) {
+      if (!minutes || minutes < 1) return { big: '0', unit: 'min' };
+      const h = Math.floor(minutes / 60);
+      const m = Math.round(minutes % 60);
+      if (h === 0) return { big: String(m), unit: 'min' };
+      if (m === 0) return { big: String(h), unit: 'uur' };
+      return { big: `${h}u`, unit: `${m}min` };
+    }
+
+    function renderChart(days) {
+      const chart = document.getElementById('chart');
+      chart.innerHTML = '';
+      const labels = ['M', 'D', 'W', 'D', 'V', 'Z', 'Z'];
+      const max = Math.max(...days, 1);
+      days.forEach((val, i) => {
+        const pct = Math.max((val / max) * 100, 4);
+        const col = document.createElement('div');
+        col.className = 'bar-col';
+        col.innerHTML = `
+          <div class="bar" style="height:${pct}%" title="${val} mails"></div>
+          <span class="bar-label">${labels[i]}</span>
+        `;
+        chart.appendChild(col);
+      });
+    }
+
+    // ============ STATS LOADER ============
+    async function loadStats(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/stats/overview', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error('stats endpoint not ok');
+        return await res.json();
+      } catch (_) {
+        // Fallback: backend endpoint bestaat nog niet → laat nullen zien
+        return {
+          time_saved_minutes: 0,
+          time_saved_delta_pct: null,
+          drafts_ready: 0,
+          emails_classified: 0,
+          priority_caught_pct: null,
+          fast_reply_pct: null,
+          spam_filtered: 0,
+          followup_active: 0,
+          waiting_reply: 0,
+          weekly_activity: [0, 0, 0, 0, 0, 0, 0],
+          _fallback: true
+        };
+      }
+    }
+
+    function renderStats(s) {
+      // Sidebar time saved
+      const t = formatTimeSaved(s.time_saved_minutes);
+      document.getElementById('sb-time').textContent = t.big;
+      document.getElementById('sb-time-unit').textContent = t.unit;
+      document.getElementById('stat-time').textContent = t.big;
+      document.getElementById('stat-time-unit').textContent = t.unit;
+
+      if (s.time_saved_delta_pct && s.time_saved_delta_pct > 0) {
+        const deltaEl = document.getElementById('sb-delta');
+        deltaEl.hidden = false;
+        document.getElementById('sb-delta-val').textContent = s.time_saved_delta_pct;
+        const d2 = document.getElementById('stat-time-delta');
+        d2.hidden = false;
+        d2.querySelector('span').textContent = s.time_saved_delta_pct;
       }
 
-      document.getElementById('user-email').textContent = session.user.email;
-      document.getElementById('gmail-email').textContent = session.user.email;
+      const hasData = !s._fallback && (s.emails_classified ?? 0) > 0;
+      const dash = '—';
 
-      // Haal subscription-status op via backend
-      const res = await fetch(API_BASE + '/api/subscription/status', {
-        headers: { 'Authorization': 'Bearer ' + session.access_token }
+      document.getElementById('stat-drafts').textContent = s.drafts_ready ?? 0;
+      document.getElementById('stat-classified').textContent = (s.emails_classified ?? 0).toLocaleString('nl-NL');
+      document.getElementById('stat-priority').textContent = hasData && s.priority_caught_pct != null ? s.priority_caught_pct : dash;
+      document.getElementById('stat-fast').textContent = hasData && s.fast_reply_pct != null ? s.fast_reply_pct : dash;
+      document.getElementById('stat-spam').textContent = (s.spam_filtered ?? 0).toLocaleString('nl-NL');
+      document.getElementById('stat-followup').textContent = s.followup_active ?? 0;
+      document.getElementById('stat-waiting').textContent = s.waiting_reply ?? 0;
+
+      // Hide "%" unit als we "—" tonen
+      if (!hasData) {
+        document.querySelectorAll('#stat-priority + .unit, #stat-fast + .unit').forEach(el => el.style.display = 'none');
+      }
+
+      const weekly = Array.isArray(s.weekly_activity) && s.weekly_activity.length === 7
+        ? s.weekly_activity : [0,0,0,0,0,0,0];
+      const weekTotal = weekly.reduce((a, b) => a + b, 0);
+      document.getElementById('week-total').textContent = weekTotal.toLocaleString('nl-NL');
+      renderChart(weekly);
+
+      document.getElementById('chart-note').textContent = s._fallback
+        ? 'Statistieken worden verzameld…'
+        : 'Bijgewerkt zojuist';
+
+      if (s._fallback) {
+        document.getElementById('sb-time-sub').textContent = 'Statistieken worden verzameld zodra er mails verwerkt zijn.';
+      }
+    }
+
+    // ============ RADAR LOADER ============
+    async function loadRadarOverview(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/radar/overview', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error('radar endpoint not ok');
+        return await res.json();
+      } catch (_) {
+        return {
+          settings: {
+            radar_enabled: true,
+            radar_grace_days: 0,
+            silence_radar_enabled: true,
+            silence_threshold_days: 5,
+            last_run_at: null
+          },
+          stats: {
+            watching_commitments: 0,
+            watching_awaiting_replies: 0,
+            nudges_this_week: 0,
+            nudges_total: 0
+          },
+          recent_activity: [],
+          _mailbox: false,
+          _fallback: true
+        };
+      }
+    }
+
+    function _fmtRelTime(iso) {
+      if (!iso) return '';
+      const d = new Date(iso);
+      if (isNaN(d)) return '';
+      const diffMs = Date.now() - d.getTime();
+      const mins = Math.round(diffMs / 60000);
+      if (mins < 1) return 'zojuist';
+      if (mins < 60) return mins + ' min geleden';
+      const hrs = Math.round(mins / 60);
+      if (hrs < 24) return hrs + ' uur geleden';
+      const days = Math.round(hrs / 24);
+      if (days < 7) return days + (days === 1 ? ' dag geleden' : ' dagen geleden');
+      return d.toLocaleDateString('nl-NL', { day: '2-digit', month: 'short' });
+    }
+
+    function renderRadar(data) {
+      const s = data.settings || {};
+      const st = data.stats || {};
+      const activity = data.recent_activity || [];
+
+      // Live badge state
+      const badge = document.getElementById('radar-live-badge');
+      const badgeText = document.getElementById('radar-live-text');
+      const anyOn = !!(s.radar_enabled || s.silence_radar_enabled);
+      if (anyOn) {
+        badge.classList.remove('paused');
+        badgeText.textContent = 'Live';
+      } else {
+        badge.classList.add('paused');
+        badgeText.textContent = 'Gepauzeerd';
+      }
+
+      // Stats
+      document.getElementById('rs-commitments').textContent = (st.watching_commitments ?? 0).toLocaleString('nl-NL');
+      document.getElementById('rs-waiting').textContent = (st.watching_awaiting_replies ?? 0).toLocaleString('nl-NL');
+      document.getElementById('rs-week').textContent = (st.nudges_this_week ?? 0).toLocaleString('nl-NL');
+      document.getElementById('rs-total').textContent = (st.nudges_total ?? 0).toLocaleString('nl-NL');
+
+      // Toggles
+      document.getElementById('tgl-radar-enabled').checked = !!s.radar_enabled;
+      document.getElementById('tgl-silence-enabled').checked = !!s.silence_radar_enabled;
+
+      // Chips — grace
+      const grace = Number(s.radar_grace_days ?? 0);
+      document.querySelectorAll('#chips-grace .chip').forEach(el => {
+        el.classList.toggle('active', Number(el.dataset.val) === grace);
       });
-      const data = await res.json();
+      // Chips — silence threshold
+      const sth = Number(s.silence_threshold_days ?? 5);
+      document.querySelectorAll('#chips-silence .chip').forEach(el => {
+        el.classList.toggle('active', Number(el.dataset.val) === sth);
+      });
 
+      // Last run hint
+      const hint = document.getElementById('radar-last-run');
+      if (s.last_run_at) {
+        hint.textContent = 'Laatste scan: ' + _fmtRelTime(s.last_run_at) + ' · automatisch elke ochtend 07:00';
+      } else {
+        hint.textContent = 'Automatisch elke ochtend om 07:00';
+      }
+
+      // Activity feed
+      const body = document.getElementById('radar-activity-body');
+      if (!activity.length) {
+        body.innerHTML = data._fallback
+          ? '<div class="ra-empty">Activiteit wordt geladen… zodra er nudges zijn, verschijnen ze hier.</div>'
+          : '<div class="ra-empty">Nog geen nudges — de radar staat scherp. Zodra er iets blijft liggen, zie je het hier verschijnen.</div>';
+      } else {
+        const items = activity.map(a => {
+          const isCommit = a.type === 'commitment';
+          const who = a.recipient_name || a.recipient_email || 'Onbekende ontvanger';
+          const subj = a.subject || '(geen onderwerp)';
+          const meta = isCommit
+            ? (a.days_overdue != null ? (a.days_overdue + ' dag' + (a.days_overdue === 1 ? '' : 'en') + ' over deadline') : 'Belofte opgevolgd')
+            : (a.days_silent != null ? (a.days_silent + ' dag' + (a.days_silent === 1 ? '' : 'en') + ' stilte') : 'Stille thread gebumped');
+          const kindClass = isCommit ? '' : 'silence';
+          const icon = isCommit
+            ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>'
+            : '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>';
+          return `
+            <li class="ra-item">
+              <span class="ra-kind ${kindClass}" aria-hidden="true">${icon}</span>
+              <div class="ra-body">
+                <div class="ra-title">${escapeHtml(who)} — ${escapeHtml(subj)}</div>
+                <div class="ra-meta">${escapeHtml(meta)}</div>
+              </div>
+              <span class="ra-time">${_fmtRelTime(a.at)}</span>
+            </li>
+          `;
+        }).join('');
+        body.innerHTML = `<ul class="ra-list" style="list-style:none; padding:0; margin:0;">${items}</ul>`;
+      }
+    }
+
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s).replace(/[&<>"']/g, c => ({
+        '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+      }[c]));
+    }
+
+    function showRadarToast(msg, kind) {
+      const t = document.getElementById('radar-toast');
+      t.className = 'radar-toast' + (kind === 'error' ? ' error' : '');
+      t.textContent = msg;
+      t.hidden = false;
+      clearTimeout(t._hideTimer);
+      t._hideTimer = setTimeout(() => { t.hidden = true; }, 4000);
+    }
+
+    async function patchRadarSettings(partial) {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) throw new Error('Geen actieve sessie — log opnieuw in');
+      const res = await fetch(API_BASE + '/api/radar/settings', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + session.access_token
+        },
+        body: JSON.stringify(partial)
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const errBody = await res.json();
+          detail = errBody.detail || errBody.message || '';
+        } catch (_) { /* ignore */ }
+        const err = new Error(detail || ('HTTP ' + res.status));
+        err.status = res.status;
+        err.detail = detail;
+        throw err;
+      }
+      return await res.json();
+    }
+
+    async function refreshRadar() {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) return;
+      const data = await loadRadarOverview(session.access_token);
+      renderRadar(data);
+    }
+
+    function wireRadarControls() {
+      // Toggles
+      document.getElementById('tgl-radar-enabled').addEventListener('change', async (e) => {
+        const val = e.target.checked;
+        try {
+          await patchRadarSettings({ radar_enabled: val });
+          showRadarToast(val ? 'Belofte-radar aan' : 'Belofte-radar uit');
+          await refreshRadar();
+        } catch (err) {
+          e.target.checked = !val;
+          showRadarToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+        }
+      });
+      document.getElementById('tgl-silence-enabled').addEventListener('change', async (e) => {
+        const val = e.target.checked;
+        try {
+          await patchRadarSettings({ silence_radar_enabled: val });
+          showRadarToast(val ? 'Stilte-radar aan' : 'Stilte-radar uit');
+          await refreshRadar();
+        } catch (err) {
+          e.target.checked = !val;
+          showRadarToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+        }
+      });
+
+      // Chip groups
+      function wireChips(groupId, field, label) {
+        const group = document.getElementById(groupId);
+        group.addEventListener('click', async (e) => {
+          const btn = e.target.closest('.chip');
+          if (!btn) return;
+          const newVal = Number(btn.dataset.val);
+          const prevActive = group.querySelector('.chip.active');
+          group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+          btn.classList.add('active');
+          try {
+            await patchRadarSettings({ [field]: newVal });
+            showRadarToast(label + ' ingesteld op ' + newVal + ' dagen');
+          } catch (err) {
+            group.querySelectorAll('.chip').forEach(c => c.classList.remove('active'));
+            if (prevActive) prevActive.classList.add('active');
+            showRadarToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+          }
+        });
+      }
+      wireChips('chips-grace', 'radar_grace_days', 'Grace-periode');
+      wireChips('chips-silence', 'silence_threshold_days', 'Stilte-drempel');
+
+      // Scan now
+      document.getElementById('btn-radar-scan').addEventListener('click', async () => {
+        const btn = document.getElementById('btn-radar-scan');
+        const label = document.getElementById('btn-radar-scan-label');
+        btn.disabled = true;
+        const prev = label.textContent;
+        label.textContent = 'Scannen…';
+        try {
+          const { data: { session } } = await sb.auth.getSession();
+          const res = await fetch(API_BASE + '/api/radar/run-now', {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + session.access_token }
+          });
+          if (!res.ok) {
+            let detail = '';
+            try {
+              const errBody = await res.json();
+              detail = errBody.detail || errBody.message || '';
+            } catch (_) {}
+            throw new Error(detail || ('HTTP ' + res.status));
+          }
+          const out = await res.json();
+          // Backend returns {follow_up:{nudges_created:N}, silence:{nudges_created:N}, total_nudges_created:N}
+          const total = Number(
+            out.total_nudges_created
+            ?? ((out.follow_up?.nudges_created ?? 0) + (out.silence?.nudges_created ?? 0))
+            ?? 0
+          );
+          if (total > 0) {
+            showRadarToast(total + ' nieuwe ' + (total === 1 ? 'opvolg-concept' : 'opvolg-concepten') + ' klaargezet');
+          } else {
+            showRadarToast('Alles is up-to-date — geen nudges nodig');
+          }
+          await refreshRadar();
+        } catch (err) {
+          showRadarToast('Scan mislukt — ' + (err.message || 'probeer over een minuut opnieuw'), 'error');
+        } finally {
+          label.textContent = prev;
+          btn.disabled = false;
+        }
+      });
+    }
+
+    // ============ AUTO-ARCHIVE ============
+    function showArchiveToast(msg, kind) {
+      const t = document.getElementById('archive-toast');
+      if (!t) return;
+      t.className = 'radar-toast' + (kind === 'error' ? ' error' : '');
+      t.textContent = msg;
+      t.hidden = false;
+      clearTimeout(t._hideTimer);
+      t._hideTimer = setTimeout(() => { t.hidden = true; }, 5000);
+    }
+
+    async function loadArchiveSettings(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/archive/settings', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (_) {
+        return { auto_archive_low_value: true, total_in_inbox: null };
+      }
+    }
+
+    function renderArchive(data) {
+      const tgl = document.getElementById('tgl-auto-archive');
+      const hint = document.getElementById('archive-hint');
+      if (tgl) tgl.checked = !!(data && data.auto_archive_low_value);
+      if (hint) {
+        const n = data && typeof data.total_in_inbox === 'number' ? data.total_in_inbox : null;
+        if (n === null) {
+          hint.textContent = 'Haalt alle bestaande Marketing/Notification/Ignore/Unwanted mails uit je Inbox.';
+        } else if (n === 0) {
+          hint.textContent = 'Je Inbox is al schoon — geen Marketing/Notification/Ignore/Unwanted mails gevonden.';
+        } else {
+          hint.textContent = n + ' ' + (n === 1 ? 'mail' : 'mails') + ' met Marketing/Notification/Ignore/Unwanted label staan nog in je Inbox.';
+        }
+      }
+    }
+
+    async function patchArchiveSettings(partial) {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) throw new Error('Geen actieve sessie — log opnieuw in');
+      const res = await fetch(API_BASE + '/api/archive/settings', {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + session.access_token
+        },
+        body: JSON.stringify(partial)
+      });
+      if (!res.ok) {
+        let detail = '';
+        try { const b = await res.json(); detail = b.detail || b.message || ''; } catch (_) {}
+        const err = new Error(detail || ('HTTP ' + res.status));
+        err.status = res.status;
+        throw err;
+      }
+      return await res.json();
+    }
+
+    async function refreshArchive() {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) return;
+      const data = await loadArchiveSettings(session.access_token);
+      renderArchive(data);
+    }
+
+    function wireArchiveControls() {
+      const tgl = document.getElementById('tgl-auto-archive');
+      if (tgl) {
+        tgl.addEventListener('change', async (e) => {
+          const val = e.target.checked;
+          try {
+            await patchArchiveSettings({ auto_archive_low_value: val });
+            showArchiveToast(val ? 'Auto-archive aan — Marketing-ruis gaat vanaf nu uit je Inbox' : 'Auto-archive uit');
+          } catch (err) {
+            e.target.checked = !val;
+            showArchiveToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+          }
+        });
+      }
+
+      const btn = document.getElementById('btn-archive-cleanup');
+      if (btn) {
+        btn.addEventListener('click', async () => {
+          const labelEl = btn.querySelector('span:last-child');
+          const prev = labelEl ? labelEl.textContent : '';
+          btn.disabled = true;
+          if (labelEl) labelEl.textContent = 'Opruimen…';
+          try {
+            const { data: { session } } = await sb.auth.getSession();
+            const res = await fetch(API_BASE + '/api/cleanup/low-value', {
+              method: 'POST',
+              headers: { 'Authorization': 'Bearer ' + session.access_token }
+            });
+            if (!res.ok) {
+              let detail = '';
+              try { const b = await res.json(); detail = b.detail || b.message || ''; } catch (_) {}
+              throw new Error(detail || ('HTTP ' + res.status));
+            }
+            const out = await res.json();
+            const total = Number(out.total_archived || 0);
+            if (total > 0) {
+              showArchiveToast(total + ' ' + (total === 1 ? 'mail' : 'mails') + ' uit je Inbox gehaald — blijven vindbaar via hun label');
+            } else {
+              showArchiveToast('Je Inbox was al schoon');
+            }
+            await refreshArchive();
+          } catch (err) {
+            showArchiveToast('Opruimen mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+          } finally {
+            if (labelEl) labelEl.textContent = prev || 'Maak Inbox schoon';
+            btn.disabled = false;
+          }
+        });
+      }
+    }
+
+    // ============ SUBSCRIPTION LOADER ============
+    async function loadSubscription(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/subscription/status', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error();
+        return await res.json();
+      } catch (_) {
+        return { plan: 'Mailbox Manager', price: '€24', next_billing_date: null };
+      }
+    }
+
+    function renderSubscription(data) {
       const planMeta = document.getElementById('plan-meta');
       if (data.cancels_at) {
         const dt = new Date(data.cancels_at).toLocaleDateString('nl-NL');
@@ -346,19 +1598,67 @@
           : '';
         planMeta.textContent = `${data.price || '€24'}/mnd · Maandelijks opzegbaar${next}`;
       }
-
       document.getElementById('plan-title').textContent = data.plan || 'Mailbox Manager';
+    }
+
+    // ============ AUTH GUARD + BOOT ============
+    (async () => {
+      const { data: { session } } = await sb.auth.getSession();
+      if (!session) {
+        window.location.href = '/login.html';
+        return;
+      }
+
+      document.getElementById('user-email').textContent = session.user.email;
+      document.getElementById('gmail-email').textContent = session.user.email;
+
+      // Nette voornaam, alleen als we 'm betrouwbaar kunnen bepalen.
+      // Bron 1: metadata.first_name (gezet bij onboarding — beste optie)
+      // Bron 2: metadata.full_name → eerste woord
+      // Bron 3: email local part, ALLEEN als er een duidelijk scheidingsteken in zit
+      //          (jesse.hendriks → Jesse). Geen separator → geen gok → "Welkom terug".
+      const meta = session.user.user_metadata || {};
+      const emailLocal = session.user.email.split('@')[0];
+      const hasSeparator = /[._-]/.test(emailLocal);
+      const fromEmail = hasSeparator
+        ? emailLocal.split(/[._-]/)[0].replace(/\d+/g, '')
+        : '';
+      const rawName = (
+        meta.first_name ||
+        (meta.full_name ? meta.full_name.split(' ')[0] : '') ||
+        fromEmail ||
+        ''
+      ).trim();
+      const firstName = rawName && rawName.length >= 2
+        ? rawName[0].toUpperCase() + rawName.slice(1).toLowerCase()
+        : '';
+      document.getElementById('welcome-title').textContent =
+        firstName ? `Welkom terug, ${firstName}` : 'Welkom terug';
+
+      const [stats, subscription, radar, archive] = await Promise.all([
+        loadStats(session.access_token),
+        loadSubscription(session.access_token),
+        loadRadarOverview(session.access_token),
+        loadArchiveSettings(session.access_token)
+      ]);
+
+      renderStats(stats);
+      renderSubscription(subscription);
+      renderRadar(radar);
+      renderArchive(archive);
+      wireRadarControls();
+      wireArchiveControls();
+
       document.getElementById('loading').style.display = 'none';
-      document.getElementById('page-content').style.display = 'block';
+      document.getElementById('page-content').style.display = 'flex';
     })();
 
-    // Logout
+    // ============ UI HANDLERS ============
     document.getElementById('logout-btn').addEventListener('click', async () => {
       await sb.auth.signOut();
-      window.location.href = '/login.html';
+      window.location.href = '/';
     });
 
-    // Cancel modal open
     document.getElementById('cancel-btn').addEventListener('click', () => {
       document.getElementById('cancel-modal').hidden = false;
     });
@@ -367,7 +1667,6 @@
     });
     document.getElementById('success-close').addEventListener('click', () => location.reload());
 
-    // Confirm cancel
     document.getElementById('confirm-cancel').addEventListener('click', async () => {
       const btn = document.getElementById('confirm-cancel');
       btn.disabled = true;
@@ -403,6 +1702,18 @@
       });
       location.reload();
     }
+
+    // Smooth-scroll sidebar links & active state
+    document.querySelectorAll('.sb-nav a[href^="#"]').forEach(link => {
+      link.addEventListener('click', (e) => {
+        const target = document.querySelector(link.getAttribute('href'));
+        if (!target) return;
+        e.preventDefault();
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        document.querySelectorAll('.sb-nav a').forEach(a => a.classList.remove('active'));
+        link.classList.add('active');
+      });
+    });
   </script>
 </body>
 </html>
