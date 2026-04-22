@@ -2862,6 +2862,52 @@ async def process_open_to_respond_threads(
             except Exception as exc:
                 print(f"[commitment-hook] Failed for thread {thread_id}: {repr(exc)}")
 
+            # --- SILENCE RADAR: track / cancel "Waiting On Reply" state ---
+            try:
+                if target_label == "Waiting On Reply":
+                    to_header_s = get_header_value(latest_user_headers, "To") or ""
+                    recipient_email_s = None
+                    recipient_name_s = None
+                    if to_header_s:
+                        import re as _re_sr
+                        ms = _re_sr.match(
+                            r'^\s*(?:"?([^"<]+?)"?\s*)?<?([^<>\s]+@[^<>\s]+)>?\s*$',
+                            to_header_s,
+                        )
+                        if ms:
+                            recipient_name_s = (ms.group(1) or "").strip() or None
+                            recipient_email_s = (ms.group(2) or "").strip().lower() or None
+
+                    sent_at_iso_s = None
+                    try:
+                        internal_ts_s = int(latest_user_message.get("internalDate", "0"))
+                        if internal_ts_s:
+                            sent_at_iso_s = datetime.fromtimestamp(
+                                internal_ts_s / 1000, tz=timezone.utc
+                            ).isoformat()
+                    except Exception:
+                        pass
+
+                    message_id_header_s = get_header_value(latest_user_headers, "Message-ID")
+
+                    if recipient_email_s:
+                        await supabase_upsert_awaiting_reply(
+                            user_id=user_id,
+                            mailbox_id=mailbox_id,
+                            gmail_thread_id=thread_id,
+                            last_user_message_id=message_id_header_s or message_id,
+                            last_user_sent_at=sent_at_iso_s or _dt.now(_tz.utc).isoformat(),
+                            recipient_email=recipient_email_s,
+                            recipient_name=recipient_name_s,
+                            subject=latest_user_subject,
+                        )
+                else:
+                    # Thread moved away from Waiting On Reply — cancel any active
+                    # awaiting_reply so we don't nudge later.
+                    await supabase_cancel_awaiting_reply_for_thread(thread_id)
+            except Exception as exc:
+                print(f"[silence-hook] Failed for thread {thread_id}: {repr(exc)}")
+
             results.append(
                 {
                     "gmail_message_id": message_id,
@@ -3019,6 +3065,13 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
                 await mark_commitments_completed_on_reply(thread_id)
         except Exception as exc:
             print(f"[radar-reply-hook] Failed for thread {thread_id}: {repr(exc)}")
+
+        # --- SILENCE RADAR: close any active awaiting_reply now that reply arrived ---
+        try:
+            if thread_reply_state.get("needs_response_after_reply") and latest_incoming_message is not None:
+                await mark_awaiting_replies_replied_on_reply(thread_id)
+        except Exception as exc:
+            print(f"[silence-reply-hook] Failed for thread {thread_id}: {repr(exc)}")
 
         current_label_ids = await sync_thread_status(
             user_id=user["id"],
@@ -5468,6 +5521,11 @@ async def radar_loop():
                     print(f"[radar] Running for {email}...")
                     result = await process_follow_up_radar_for_mailbox(email)
                     print(f"[radar] {email}: {result}")
+                    try:
+                        result_s = await process_silence_radar_for_mailbox(email)
+                        print(f"[radar-silence] {email}: {result_s}")
+                    except Exception as exc_s:
+                        print(f"[radar-silence] loop-call failed for {email}: {repr(exc_s)}")
                 except Exception as exc:
                     print(f"[radar] mailbox loop failure for {mailbox.get('email_address')}: {repr(exc)}")
         except Exception as exc:
@@ -5525,11 +5583,380 @@ async def http_reset_commitment_nudge(
 
 
 # ---------------------------------------------------------------------------
+# SECTION H — SILENCE RADAR: nudge on "Waiting On Reply" threads gone quiet
+# ---------------------------------------------------------------------------
+
+SILENCE_RADAR_ENABLED_GLOBAL = os.getenv("SILENCE_RADAR_ENABLED", "true").lower() == "true"
+SILENCE_RADAR_MAX_NUDGES_PER_RUN = int(os.getenv("SILENCE_RADAR_MAX_NUDGES_PER_RUN", "10"))
+SILENCE_RADAR_DEFAULT_THRESHOLD_DAYS = int(os.getenv("SILENCE_RADAR_DEFAULT_THRESHOLD_DAYS", "5"))
+
+
+async def supabase_upsert_awaiting_reply(
+    user_id: str,
+    mailbox_id: str,
+    gmail_thread_id: str,
+    last_user_message_id: str | None,
+    last_user_sent_at: str,
+    recipient_email: str | None,
+    recipient_name: str | None,
+    subject: str | None,
+) -> None:
+    """
+    Upsert awaiting_reply on (mailbox_id, gmail_thread_id).
+    A new sent message on the same thread RESETS the silence clock:
+      - last_user_sent_at moves forward
+      - nudge_sent_at/nudge_count reset so we nudge again if silence continues
+      - nudge_suppressed is NOT reset (it's omitted from payload → preserved)
+    """
+    if not (user_id and mailbox_id and gmail_thread_id and last_user_sent_at):
+        return
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        payload = {
+            "user_id": user_id,
+            "mailbox_id": mailbox_id,
+            "gmail_thread_id": gmail_thread_id,
+            "last_user_message_id": last_user_message_id,
+            "last_user_sent_at": last_user_sent_at,
+            "recipient_email": recipient_email,
+            "recipient_name": recipient_name,
+            "subject": subject,
+            "status": "active",
+            "replied_at": None,
+            "nudge_sent_at": None,
+            "nudge_count": 0,
+            "nudge_draft_id": None,
+            "updated_at": now_iso,
+        }
+        await supabase_post(
+            "/rest/v1/awaiting_replies?on_conflict=mailbox_id,gmail_thread_id",
+            payload,
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+    except Exception as exc:
+        print(f"[silence] upsert awaiting_reply failed for thread {gmail_thread_id}: {repr(exc)}")
+
+
+async def supabase_cancel_awaiting_reply_for_thread(gmail_thread_id: str) -> None:
+    """Mark any active awaiting_reply for this thread as cancelled (label moved away from WOR)."""
+    if not gmail_thread_id:
+        return
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        await supabase_patch(
+            f"/rest/v1/awaiting_replies?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active",
+            {"status": "cancelled", "updated_at": now_iso},
+        )
+    except Exception as exc:
+        print(f"[silence] cancel awaiting_reply failed for thread {gmail_thread_id}: {repr(exc)}")
+
+
+async def supabase_mark_awaiting_reply_replied(gmail_thread_id: str) -> None:
+    """Mark awaiting_reply as replied once an external reply arrives on the thread."""
+    if not gmail_thread_id:
+        return
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        await supabase_patch(
+            f"/rest/v1/awaiting_replies?gmail_thread_id=eq.{gmail_thread_id}&status=eq.active",
+            {"status": "replied", "replied_at": now_iso, "updated_at": now_iso},
+        )
+    except Exception as exc:
+        print(f"[silence] mark-replied failed for thread {gmail_thread_id}: {repr(exc)}")
+
+
+async def mark_awaiting_replies_replied_on_reply(gmail_thread_id: str) -> None:
+    """Convenience wrapper for the inbound-reply hook."""
+    await supabase_mark_awaiting_reply_replied(gmail_thread_id)
+
+
+async def supabase_get_stale_awaiting_replies_for_mailbox(
+    mailbox_id: str,
+    threshold_days: int,
+) -> list[dict[str, Any]]:
+    """
+    Active, non-suppressed, not-yet-nudged rows whose last_user_sent_at is older
+    than (now - threshold_days).
+    """
+    try:
+        cutoff = (_dt.now(_tz.utc) - _td(days=threshold_days)).isoformat()
+        rows = await supabase_get(
+            f"/rest/v1/awaiting_replies"
+            f"?mailbox_id=eq.{mailbox_id}"
+            f"&status=eq.active"
+            f"&nudge_suppressed=eq.false"
+            f"&nudge_sent_at=is.null"
+            f"&last_user_sent_at=lte.{cutoff}"
+            f"&order=last_user_sent_at.asc"
+            f"&select=*"
+        )
+        return rows if isinstance(rows, list) else []
+    except Exception as exc:
+        print(f"[silence] fetch stale awaiting_replies failed for mailbox {mailbox_id}: {repr(exc)}")
+        return []
+
+
+async def supabase_mark_awaiting_reply_nudged(
+    awaiting_reply_id: str,
+    gmail_draft_id: str | None,
+) -> None:
+    try:
+        now_iso = _dt.now(_tz.utc).isoformat()
+        await supabase_patch(
+            f"/rest/v1/awaiting_replies?id=eq.{awaiting_reply_id}",
+            {
+                "nudge_sent_at": now_iso,
+                "nudge_count": 1,
+                "nudge_draft_id": gmail_draft_id,
+                "updated_at": now_iso,
+            },
+        )
+    except Exception as exc:
+        print(f"[silence] mark-nudged failed for awaiting_reply {awaiting_reply_id}: {repr(exc)}")
+
+
+async def get_mailbox_silence_config(mailbox_id: str) -> dict[str, Any]:
+    try:
+        rows = await supabase_get(
+            f"/rest/v1/mailboxes?id=eq.{mailbox_id}"
+            f"&select=silence_radar_enabled,silence_threshold_days,email_address"
+        )
+        return rows[0] if rows else {}
+    except Exception as exc:
+        print(f"[silence] get config failed for mailbox {mailbox_id}: {repr(exc)}")
+        return {}
+
+
+async def generate_silence_nudge_draft(
+    user_id: str,
+    row: dict[str, Any],
+    days_silent: int,
+) -> str:
+    """Short, friendly bump reply in user's voice."""
+    recipient_name = (row.get("recipient_name") or "").strip()
+    recipient_email = (row.get("recipient_email") or "").strip()
+    subject = row.get("subject") or "Korte check"
+    salutation_target = recipient_name or recipient_email or "daar"
+
+    pseudo_body = (
+        f"[INTERN NUDGE-CONTEXT — dit is GEEN echte inkomende e-mail]\n"
+        f"De gebruiker heeft {days_silent} dag(en) geleden gemaild naar {salutation_target} "
+        f"over '{subject}'.\n"
+        f"Er is nog geen reactie binnengekomen.\n\n"
+        f"Schrijf een korte, vriendelijke herinnering (bump).\n"
+        f"Richtlijnen voor deze draft:\n"
+        f"- Niet verwijtend; ga uit van een drukke inbox aan de andere kant.\n"
+        f"- Verwijs kort naar de eerdere mail.\n"
+        f"- Vraag of er iets onduidelijk is of wanneer een reactie te verwachten is.\n"
+        f"- Max 3-5 zinnen.\n"
+        f"- Geen onderwerpregel."
+    )
+    try:
+        reply = await generate_ai_reply(
+            user_id=user_id,
+            subject=subject,
+            sender=recipient_email or recipient_name or None,
+            body_text=pseudo_body,
+        )
+        return reply or ""
+    except Exception as exc:
+        print(f"[silence] generate_silence_nudge_draft failed: {repr(exc)}")
+        fallback = (
+            f"Hoi {recipient_name or ''},\n\n"
+            f"Ik wilde m'n eerdere mail even bij je onder de aandacht brengen. "
+            f"Weet je al wanneer je hier een reactie op kunt geven? "
+            f"Laat het gerust weten als er iets onduidelijk is.\n\n"
+            f"Groet"
+        )
+        return fallback.strip()
+
+
+async def process_silence_radar_for_mailbox(email: str) -> dict[str, Any]:
+    """
+    Scans awaiting_replies that have gone silent past threshold. For each:
+      1. Verifies thread still has "Waiting On Reply" label in Gmail.
+      2. Escalates thread label -> Priority.
+      3. Generates a threaded Gmail draft (no auto-send).
+      4. Persists nudge_sent_at on the awaiting_reply row.
+    Idempotent — nudge_sent_at IS NULL filter prevents re-nudging.
+    """
+    if not SILENCE_RADAR_ENABLED_GLOBAL:
+        return {"status": "disabled_global", "nudges_created": 0}
+
+    user = await supabase_get_user_by_email(email)
+    if not user:
+        return {"status": "no_user", "nudges_created": 0}
+
+    mailbox = await supabase_get_mailbox_by_user_and_email(user["id"], email)
+    if not mailbox:
+        return {"status": "no_mailbox", "nudges_created": 0}
+
+    config = await get_mailbox_silence_config(mailbox["id"])
+    if not config.get("silence_radar_enabled", True):
+        return {"status": "disabled_for_mailbox", "nudges_created": 0}
+
+    threshold_days = int(
+        config.get("silence_threshold_days") or SILENCE_RADAR_DEFAULT_THRESHOLD_DAYS
+    )
+    stale = await supabase_get_stale_awaiting_replies_for_mailbox(
+        mailbox_id=mailbox["id"], threshold_days=threshold_days,
+    )
+    if not stale:
+        return {"status": "no_stale", "nudges_created": 0}
+
+    stale = stale[:SILENCE_RADAR_MAX_NUDGES_PER_RUN]
+
+    try:
+        labels = await get_all_gmail_labels(user["id"])
+        label_name_to_id = {
+            name: lbl["id"] for name, lbl in labels.items() if isinstance(lbl, dict) and "id" in lbl
+        }
+    except Exception as exc:
+        print(f"[silence] label fetch failed for {email}: {repr(exc)}")
+        label_name_to_id = {}
+
+    waiting_label_id = label_name_to_id.get("Waiting On Reply") or label_name_to_id.get(
+        "OfficeFlow/Waiting On Reply"
+    )
+
+    nudges_created = 0
+    errors: list[str] = []
+
+    for row in stale:
+        try:
+            row_id = row.get("id")
+            thread_id = row.get("gmail_thread_id")
+            recipient_email = row.get("recipient_email")
+
+            if not row_id or not thread_id or not recipient_email:
+                errors.append(f"awaiting_reply {row_id}: missing thread_id or recipient_email")
+                continue
+
+            thread_info = await get_thread_message_headers(user["id"], thread_id)
+            if not thread_info:
+                errors.append(f"awaiting_reply {row_id}: thread fetch failed")
+                continue
+
+            # Verify the thread is still genuinely Waiting On Reply.
+            current_label_ids = thread_info.get("current_label_ids") or set()
+            if waiting_label_id and waiting_label_id not in current_label_ids:
+                await supabase_cancel_awaiting_reply_for_thread(thread_id)
+                continue
+
+            # Compute days silent for prompt.
+            try:
+                last_sent_raw = row.get("last_user_sent_at") or ""
+                last_sent_dt = _dt.fromisoformat(last_sent_raw.replace("Z", "+00:00"))
+                days_silent = max(1, (_dt.now(_tz.utc) - last_sent_dt).days)
+            except Exception:
+                days_silent = threshold_days
+
+            if "Priority" in label_name_to_id:
+                try:
+                    await sync_thread_status(
+                        user_id=user["id"],
+                        thread_id=thread_id,
+                        current_message_id=thread_info.get("gmail_message_id") or "",
+                        current_label_ids=current_label_ids,
+                        label_name_to_id=label_name_to_id,
+                        target_label_name="Priority",
+                    )
+                except Exception as exc:
+                    print(f"[silence] escalate label failed for awaiting_reply {row_id}: {repr(exc)}")
+
+            nudge_body = await generate_silence_nudge_draft(
+                user_id=user["id"], row=row, days_silent=days_silent,
+            )
+            if not nudge_body or len(nudge_body.strip()) < 10:
+                errors.append(f"awaiting_reply {row_id}: empty nudge body")
+                continue
+
+            draft_result = await create_gmail_threaded_draft(
+                user_id=user["id"],
+                to_email=recipient_email,
+                subject=thread_info.get("subject") or row.get("subject") or "Korte check",
+                body=nudge_body,
+                thread_id=thread_id,
+                original_message_id_header=thread_info.get("message_id_header"),
+                references_header=thread_info.get("references_header"),
+            )
+            gmail_draft_id = (draft_result or {}).get("id")
+
+            await supabase_mark_awaiting_reply_nudged(
+                awaiting_reply_id=row_id,
+                gmail_draft_id=gmail_draft_id,
+            )
+            nudges_created += 1
+        except Exception as exc:
+            errors.append(f"awaiting_reply {row.get('id')}: {repr(exc)}")
+            print(f"[silence] per-row failure: {repr(exc)}")
+
+    return {
+        "status": "ok",
+        "email": email,
+        "candidates": len(stale),
+        "nudges_created": nudges_created,
+        "threshold_days": threshold_days,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Internal / testing endpoints for the silence radar
+# ---------------------------------------------------------------------------
+
+@app.post("/internal/silence-radar/run")
+async def http_run_silence_radar(email: str = Body(..., embed=True)):
+    """Manually trigger the silence radar for one mailbox. Use for QA/testing."""
+    return await process_silence_radar_for_mailbox(email)
+
+
+@app.post("/internal/silence-radar/suppress")
+async def http_suppress_awaiting_reply_nudge(
+    awaiting_reply_id: str = Body(..., embed=True),
+):
+    """User can suppress nudging for a specific awaiting_reply (future UI hook)."""
+    try:
+        updated = await supabase_patch(
+            f"/rest/v1/awaiting_replies?id=eq.{awaiting_reply_id}",
+            {"nudge_suppressed": True, "updated_at": _dt.now(_tz.utc).isoformat()},
+            prefer="return=representation",
+        )
+        return {"status": "ok", "awaiting_reply": updated[0] if isinstance(updated, list) and updated else None}
+    except Exception as exc:
+        return {"status": "error", "error": repr(exc)}
+
+
+@app.post("/internal/silence-radar/reset")
+async def http_reset_awaiting_reply_nudge(
+    awaiting_reply_id: str = Body(..., embed=True),
+):
+    """Clear nudge state so the awaiting_reply can be nudged again on next run."""
+    try:
+        updated = await supabase_patch(
+            f"/rest/v1/awaiting_replies?id=eq.{awaiting_reply_id}",
+            {
+                "nudge_sent_at": None,
+                "nudge_count": 0,
+                "nudge_draft_id": None,
+                "nudge_suppressed": False,
+                "status": "active",
+                "replied_at": None,
+                "updated_at": _dt.now(_tz.utc).isoformat(),
+            },
+            prefer="return=representation",
+        )
+        return {"status": "ok", "awaiting_reply": updated[0] if isinstance(updated, list) and updated else None}
+    except Exception as exc:
+        return {"status": "error", "error": repr(exc)}
+
+
+# ---------------------------------------------------------------------------
 # SECTION F — STARTUP HOOK (add briefing + radar loops to background tasks)
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
 async def start_features_background_tasks():
-    print("Features background tasks started (briefing + radar)")
+    print("Features background tasks started (briefing + radar + silence)")
     asyncio.create_task(briefing_loop())
     asyncio.create_task(radar_loop())
