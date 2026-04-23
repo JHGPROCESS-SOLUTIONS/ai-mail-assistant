@@ -17,6 +17,10 @@ PRICE_YEARLY = os.getenv("STRIPE_PRICE_YEARLY")
 PRICE_STARTER = os.getenv("STRIPE_PRICE_STARTER")
 PRICE_PRO = os.getenv("STRIPE_PRICE_PRO")
 
+# BTW tarief (21% NL) — Stripe Tax Rate ID, e.g. txr_1Ab...
+# Prices in Stripe are EXCLUSIVE of BTW; Stripe voegt het tarief bovenop toe bij checkout.
+TAX_RATE_NL = os.getenv("STRIPE_TAX_RATE_NL")
+
 SUCCESS_URL = os.getenv(
     "STRIPE_SUCCESS_URL",
     "https://officeflowcompany.com/payment/success",
@@ -70,16 +74,20 @@ def normalize_email(email: str | None) -> str:
 def create_stripe_checkout_session(plan: str, email: str):
     require_stripe()
 
+    line_item: dict = {
+        "price": get_price_id(plan),
+        "quantity": 1,
+    }
+    # Apply 21% BTW if configured. Prices are exclusive of tax,
+    # so the subtotal + 21% becomes the total the customer pays.
+    if TAX_RATE_NL:
+        line_item["tax_rates"] = [TAX_RATE_NL]
+
     try:
         session = stripe.checkout.Session.create(
             payment_method_types=["card", "ideal", "bancontact"],
             mode="subscription",
-            line_items=[
-                {
-                    "price": get_price_id(plan),
-                    "quantity": 1,
-                }
-            ],
+            line_items=[line_item],
             success_url=SUCCESS_URL,
             cancel_url=CANCEL_URL,
             customer_email=email,
