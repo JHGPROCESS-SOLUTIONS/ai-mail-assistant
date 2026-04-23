@@ -1175,6 +1175,19 @@
       <section id="account">
         <div class="section-title">Account</div>
         <div class="card">
+
+          <!-- WEEKLY RECAP TOGGLE -->
+          <div class="rc-row" style="padding:4px 0 14px;border-bottom:1px solid var(--border-soft);margin-bottom:10px;">
+            <div>
+              <div class="k">Weekoverzicht per mail</div>
+              <div class="s">Elke zaterdagochtend een korte samenvatting: mails verwerkt, concepten klaargezet en tijd bespaard.</div>
+            </div>
+            <label class="switch" aria-label="Weekrecap aan/uit">
+              <input id="tgl-weekly-recap" type="checkbox">
+              <span class="slider"></span>
+            </label>
+          </div>
+
           <div class="link-row">
             <span>Wachtwoord wijzigen</span>
             <a href="/reset-password.html">Wijzig →</a>
@@ -1647,6 +1660,52 @@
       t._hideTimer = setTimeout(() => { t.hidden = true; }, 5000);
     }
 
+    // ============ WEEKLY RECAP TOGGLE ============
+    async function loadWeeklyRecapSettings(accessToken) {
+      try {
+        const res = await fetch(API_BASE + '/api/preferences/weekly-recap', {
+          headers: { 'Authorization': 'Bearer ' + accessToken }
+        });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        return await res.json();
+      } catch (_) {
+        return { enabled: true };
+      }
+    }
+
+    function renderWeeklyRecap(data) {
+      const tgl = document.getElementById('tgl-weekly-recap');
+      if (tgl) tgl.checked = !!(data && data.enabled);
+    }
+
+    function wireWeeklyRecapToggle() {
+      const tgl = document.getElementById('tgl-weekly-recap');
+      if (!tgl) return;
+      tgl.addEventListener('change', async (e) => {
+        const val = e.target.checked;
+        try {
+          const { data: { session } } = await sb.auth.getSession();
+          if (!session) throw new Error('Geen actieve sessie');
+          const res = await fetch(API_BASE + '/api/preferences/weekly-recap', {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer ' + session.access_token
+            },
+            body: JSON.stringify({ enabled: val })
+          });
+          if (!res.ok) throw new Error('HTTP ' + res.status);
+          showArchiveToast(val
+            ? 'Weekoverzicht staat aan — je krijgt zaterdagochtend een samenvatting'
+            : 'Weekoverzicht staat uit'
+          );
+        } catch (err) {
+          e.target.checked = !val;
+          showArchiveToast('Opslaan mislukt — ' + (err.message || 'probeer opnieuw'), 'error');
+        }
+      });
+    }
+
     async function loadArchiveSettings(accessToken) {
       try {
         const res = await fetch(API_BASE + '/api/archive/settings', {
@@ -2002,12 +2061,13 @@
       document.getElementById('welcome-title').textContent =
         firstName ? `Welkom terug, ${firstName}` : 'Welkom terug';
 
-      const [stats, subscription, radar, archive, recentDrafts] = await Promise.all([
+      const [stats, subscription, radar, archive, recentDrafts, weeklyRecap] = await Promise.all([
         loadStats(session.access_token),
         loadSubscription(session.access_token),
         loadRadarOverview(session.access_token),
         loadArchiveSettings(session.access_token),
-        loadRecentDrafts(session.access_token)
+        loadRecentDrafts(session.access_token),
+        loadWeeklyRecapSettings(session.access_token)
       ]);
 
       renderStats(stats);
@@ -2015,8 +2075,10 @@
       renderRadar(radar);
       renderArchive(archive);
       renderRecentDrafts(recentDrafts);
+      renderWeeklyRecap(weeklyRecap);
       wireRadarControls();
       wireArchiveControls();
+      wireWeeklyRecapToggle();
 
       // First-run wow moment — non-blocking, fails silent.
       maybeShowWelcomeModal(session.access_token, firstName).catch((err) => {

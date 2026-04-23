@@ -10,8 +10,12 @@ STRIPE_SECRET_KEY = os.getenv("STRIPE_SECRET_KEY")
 if STRIPE_SECRET_KEY:
     stripe.api_key = STRIPE_SECRET_KEY
 
-PRICE_STARTER = os.getenv("STRIPE_PRICE_STARTER", "price_1TEU9gPBSJU3A3dnTg1vAPCx")
-PRICE_PRO = os.getenv("STRIPE_PRICE_PRO", "price_1TEUABPBSJU3A3dnFlIlIxzr")
+PRICE_MONTHLY = os.getenv("STRIPE_PRICE_MONTHLY")
+PRICE_YEARLY = os.getenv("STRIPE_PRICE_YEARLY")
+
+# Legacy env vars — kept as fallback so old links/tests keep working during switch.
+PRICE_STARTER = os.getenv("STRIPE_PRICE_STARTER")
+PRICE_PRO = os.getenv("STRIPE_PRICE_PRO")
 
 SUCCESS_URL = os.getenv(
     "STRIPE_SUCCESS_URL",
@@ -31,13 +35,24 @@ def require_stripe():
 def get_price_id(plan: str) -> str:
     normalized_plan = (plan or "").strip().lower()
 
-    if normalized_plan == "starter":
-        return PRICE_STARTER
+    # New canonical plans
+    if normalized_plan in ("monthly", "month", "maandelijks"):
+        if not PRICE_MONTHLY:
+            raise HTTPException(status_code=500, detail="Missing env var: STRIPE_PRICE_MONTHLY")
+        return PRICE_MONTHLY
 
-    if normalized_plan == "pro":
+    if normalized_plan in ("yearly", "year", "annual", "jaarlijks"):
+        if not PRICE_YEARLY:
+            raise HTTPException(status_code=500, detail="Missing env var: STRIPE_PRICE_YEARLY")
+        return PRICE_YEARLY
+
+    # Legacy fallback (remove once all links updated)
+    if normalized_plan == "starter" and PRICE_STARTER:
+        return PRICE_STARTER
+    if normalized_plan == "pro" and PRICE_PRO:
         return PRICE_PRO
 
-    raise HTTPException(status_code=400, detail="Invalid plan. Use 'starter' or 'pro'.")
+    raise HTTPException(status_code=400, detail="Invalid plan. Use 'monthly' or 'yearly'.")
 
 
 def normalize_email(email: str | None) -> str:
@@ -91,7 +106,7 @@ def create_stripe_checkout_session(plan: str, email: str):
 
 @router.post("/billing/create-checkout-session")
 async def create_checkout_session(
-    plan: str = "starter",
+    plan: str = "monthly",
     email: str | None = None,
 ):
     normalized_email = normalize_email(email)
@@ -107,7 +122,7 @@ async def create_checkout_session(
 
 @router.get("/billing/start-checkout")
 async def start_checkout(
-    plan: str = "starter",
+    plan: str = "monthly",
     email: str | None = Query(default=None),
 ):
     normalized_email = normalize_email(email)
