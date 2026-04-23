@@ -72,7 +72,7 @@ def create_stripe_checkout_session(plan: str, email: str):
 
     try:
         session = stripe.checkout.Session.create(
-            payment_method_types=["card"],
+            payment_method_types=["card", "ideal", "bancontact"],
             mode="subscription",
             line_items=[
                 {
