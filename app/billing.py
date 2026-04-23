@@ -69,9 +69,16 @@ def create_stripe_checkout_session(plan: str, email: str):
             cancel_url=CANCEL_URL,
             customer_email=email,
             client_reference_id=email,
+            allow_promotion_codes=True,
             metadata={
                 "plan": plan,
                 "email": email,
+            },
+            subscription_data={
+                "metadata": {
+                    "plan": plan,
+                    "email": email,
+                },
             },
         )
         return session
