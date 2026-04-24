@@ -179,7 +179,10 @@ async def handle_team_checkout_completed(data: dict[str, Any]) -> None:
     met product_family='officeflow_team'. Maakt team + owner-membership aan."""
     main = _get_main()
 
-    metadata = data.get("metadata") or {}
+    # Normaliseer metadata naar een gewone dict (Stripe stuurt soms StripeObject)
+    raw_metadata = stripe_obj_get(data, "metadata") or {}
+    metadata: dict[str, Any] = dict(raw_metadata) if raw_metadata else {}
+
     email = (
         stripe_obj_get(data, "customer_email")
         or stripe_obj_get(data, "client_reference_id")
@@ -192,10 +195,13 @@ async def handle_team_checkout_completed(data: dict[str, Any]) -> None:
     customer_id = stripe_obj_get(data, "customer")
     subscription_id = stripe_obj_get(data, "subscription")
 
-    tier = (metadata.get("tier") or "team_s").lower()
-    billing_period = (metadata.get("billing_period") or "monthly").lower()
-    team_name = metadata.get("team_name") or email
-    seats = TEAM_TIER_SEATS.get(tier, int(metadata.get("seats") or 3))
+    tier = str(metadata.get("tier") or "team_s").lower()
+    billing_period = str(metadata.get("billing_period") or "monthly").lower()
+    team_name = str(metadata.get("team_name") or email)
+    try:
+        seats = TEAM_TIER_SEATS.get(tier) or int(metadata.get("seats") or 3)
+    except (TypeError, ValueError):
+        seats = 3
 
     # 1. Zorg dat de owner-user bestaat (net als bij solo flow)
     user = await main.supabase_get_user_by_email(email)
@@ -251,7 +257,8 @@ async def handle_team_subscription_updated(
     False als niet — dan kan main.py nog solo-logica proberen."""
     main = _get_main()
 
-    metadata = data.get("metadata") or {}
+    raw_metadata = stripe_obj_get(data, "metadata") or {}
+    metadata: dict[str, Any] = dict(raw_metadata) if raw_metadata else {}
     # Sommige webhooks hebben metadata op Subscription, andere niet —
     # probeer beide paden.
     if not is_team_checkout(metadata):

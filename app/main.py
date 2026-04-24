@@ -4506,11 +4506,19 @@ async def stripe_webhook(request: Request):
         if event_type == "checkout.session.completed":
             from app import teams as teams_module
 
-            session_metadata = stripe_obj_get(data, "metadata") or {}
+            # Normaliseer metadata naar dict voor veilige .get() calls
+            raw_md = stripe_obj_get(data, "metadata") or {}
+            session_metadata = dict(raw_md) if raw_md else {}
 
             # Team checkout? Route naar teams.py — creëert team + membership
             if teams_module.is_team_checkout(session_metadata):
-                await teams_module.handle_team_checkout_completed(data)
+                try:
+                    await teams_module.handle_team_checkout_completed(data)
+                except Exception as exc:
+                    import traceback
+                    print(f"[teams-webhook] FAILED: {repr(exc)}")
+                    print(traceback.format_exc())
+                    raise
                 return {"received": True}
 
             # Solo checkout (bestaand gedrag)
