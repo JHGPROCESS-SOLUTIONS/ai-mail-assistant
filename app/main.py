@@ -1107,15 +1107,20 @@ async def supabase_upsert_mailbox(
     provider: str,
     email_address: str,
     status: str = "connected",
+    team_id: str | None = None,
 ) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "user_id": user_id,
+        "provider": provider,
+        "email_address": email_address,
+        "status": status,
+    }
+    if team_id:
+        payload["team_id"] = team_id
+
     data = await supabase_post(
         "/rest/v1/mailboxes?on_conflict=user_id,provider,email_address",
-        [{
-            "user_id": user_id,
-            "provider": provider,
-            "email_address": email_address,
-            "status": status,
-        }],
+        [payload],
         prefer="resolution=merge-duplicates,return=representation",
     )
 
@@ -3799,6 +3804,36 @@ async def google_callback(code: str):
     if user_name and user_name != existing_user.get("full_name"):
         await supabase_update_user_profile(user_id=user_id, full_name=user_name)
 
+    # --- Team seat-enforcement ---------------------------------
+    # Als deze user lid is van een team, check of er nog een seat beschikbaar is.
+    # Zo niet → redirect naar team-pagina met upgrade-hint.
+    team_id_for_mailbox: str | None = None
+    try:
+        from app import teams as teams_module
+        user_teams = await teams_module._resolve_user_teams(user_id)
+        if user_teams:
+            # Pak eerste team waar user lid van is met active access
+            active_team = next(
+                (t for t in user_teams if t["team"].get("access_allowed")),
+                None,
+            )
+            if active_team:
+                # Check of deze mailbox al gekoppeld is (herkoppeling mag altijd)
+                already_connected = any(
+                    mb.get("email_address", "").lower() == user_email.lower()
+                    for mb in active_team["mailboxes"]
+                )
+                if not already_connected and active_team["seats_used"] >= active_team["seats_total"]:
+                    # Seat-limit bereikt → redirect naar team-page
+                    return RedirectResponse(
+                        url="https://officeflowcompany.com/team.html?error=seat_limit",
+                        status_code=302,
+                    )
+                team_id_for_mailbox = active_team["team"]["id"]
+    except Exception as exc:
+        print(f"[oauth-callback] team seat check failed: {repr(exc)}")
+    # ------------------------------------------------------------
+
     await supabase_upsert_oauth_account(
         user_id=user_id,
         provider="google",
@@ -3807,12 +3842,16 @@ async def google_callback(code: str):
         refresh_token=refresh_token,
     )
 
-    await supabase_upsert_mailbox(
-        user_id=user_id,
-        provider="gmail",
-        email_address=user_email,
-        status="pending_setup",
-    )
+    mailbox_payload: dict[str, Any] = {
+        "user_id": user_id,
+        "provider": "gmail",
+        "email_address": user_email,
+        "status": "pending_setup",
+    }
+    if team_id_for_mailbox:
+        mailbox_payload["team_id"] = team_id_for_mailbox
+
+    await supabase_upsert_mailbox(**mailbox_payload)
 
     await supabase_upsert_onboarding_state(
         user_id=user_id,
@@ -6475,6 +6514,159 @@ async def api_invite_to_team(
         invite_email=body.email,
         role=body.role,
     )
+
+
+@app.delete("/api/teams/{team_id}/members/{target_user_id}")
+async def api_remove_team_member(
+    team_id: str,
+    target_user_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Verwijder een lid uit een team. Alleen admin. Owner kan niet verwijderd worden."""
+    from app import teams as teams_module
+    return await teams_module.remove_member_from_team(
+        admin_user_id=user["id"],
+        team_id=team_id,
+        target_user_id=target_user_id,
+    )
+
+
+class _RoleChangePayload(BaseModel):
+    role: str
+
+
+@app.patch("/api/teams/{team_id}/members/{target_user_id}/role")
+async def api_change_team_member_role(
+    team_id: str,
+    target_user_id: str,
+    body: _RoleChangePayload,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Wijzig role van een team-lid (admin / member). Alleen admin."""
+    from app import teams as teams_module
+    return await teams_module.change_member_role(
+        admin_user_id=user["id"],
+        team_id=team_id,
+        target_user_id=target_user_id,
+        new_role=body.role,
+    )
+
+
+@app.post("/api/teams/{team_id}/billing-portal")
+async def api_team_billing_portal(
+    team_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Genereer een Stripe Customer Portal URL voor team-billing beheer.
+    Alleen admin. Klant kan via de portal plan wijzigen, payment method updaten, cancelen."""
+    from app import teams as teams_module
+    import stripe as stripe_sdk
+
+    # Check admin
+    membership_rows = await supabase_get(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(user['id'], safe='')}&select=role"
+    )
+    if not isinstance(membership_rows, list) or not membership_rows:
+        raise HTTPException(status_code=403, detail="Geen lid van dit team.")
+    if membership_rows[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Alleen admin kan billing beheren.")
+
+    # Haal team op voor stripe_customer_id
+    team_rows = await supabase_get(
+        f"/rest/v1/teams?id=eq.{quote(team_id, safe='')}&select=stripe_customer_id"
+    )
+    if not isinstance(team_rows, list) or not team_rows:
+        raise HTTPException(status_code=404, detail="Team niet gevonden.")
+    customer_id = team_rows[0].get("stripe_customer_id")
+    if not customer_id:
+        raise HTTPException(status_code=400, detail="Team heeft geen Stripe-customer gekoppeld.")
+
+    stripe_secret = os.getenv("STRIPE_SECRET_KEY")
+    if not stripe_secret:
+        raise HTTPException(status_code=500, detail="STRIPE_SECRET_KEY ontbreekt.")
+    stripe_sdk.api_key = stripe_secret
+
+    try:
+        session = stripe_sdk.billing_portal.Session.create(
+            customer=customer_id,
+            return_url="https://officeflowcompany.com/team.html",
+        )
+        return {"url": session.url}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Stripe portal error: {str(exc)}")
+
+
+@app.get("/api/teams/{team_id}/stats")
+async def api_team_stats(
+    team_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Aggregated stats voor alle mailboxen in dit team (laatste 7 dagen)."""
+    # Check lid
+    membership_rows = await supabase_get(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(user['id'], safe='')}&select=role"
+    )
+    if not isinstance(membership_rows, list) or not membership_rows:
+        raise HTTPException(status_code=403, detail="Geen lid van dit team.")
+
+    # Haal alle mailboxen in dit team
+    mailbox_rows = await supabase_get(
+        f"/rest/v1/mailboxes?team_id=eq.{quote(team_id, safe='')}&select=id,email_address,user_id,status"
+    )
+    mailboxes = mailbox_rows if isinstance(mailbox_rows, list) else []
+
+    # 7-dagen cutoff
+    now_utc = datetime.now(timezone.utc)
+    cutoff_iso = (now_utc - timedelta(days=7)).isoformat()
+
+    per_mailbox = []
+    total_mails = 0
+    total_drafts = 0
+
+    for mb in mailboxes:
+        mb_id = mb.get("id")
+        if not mb_id:
+            continue
+
+        # Mails geclassificeerd laatste 7 dagen
+        mails_count = 0
+        drafts_count = 0
+        try:
+            mails_count = await supabase_get_count(
+                f"/rest/v1/messages?mailbox_id=eq.{quote(mb_id, safe='')}"
+                f"&created_at=gte.{quote(cutoff_iso, safe='')}"
+            )
+        except Exception:
+            pass
+        try:
+            drafts_count = await supabase_get_count(
+                f"/rest/v1/drafts?mailbox_id=eq.{quote(mb_id, safe='')}"
+                f"&created_at=gte.{quote(cutoff_iso, safe='')}"
+            )
+        except Exception:
+            pass
+
+        total_mails += mails_count
+        total_drafts += drafts_count
+
+        per_mailbox.append({
+            "mailbox_id": mb_id,
+            "email_address": mb.get("email_address"),
+            "status": mb.get("status"),
+            "mails_7d": mails_count,
+            "drafts_7d": drafts_count,
+        })
+
+    return {
+        "team_id": team_id,
+        "period_days": 7,
+        "total_mails": total_mails,
+        "total_drafts": total_drafts,
+        "mailbox_count": len(mailboxes),
+        "per_mailbox": per_mailbox,
+    }
 
 
 @app.get("/api/radar/overview")

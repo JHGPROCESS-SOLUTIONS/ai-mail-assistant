@@ -444,6 +444,85 @@ async def invite_member_to_team(
     }
 
 
+async def remove_member_from_team(
+    admin_user_id: str,
+    team_id: str,
+    target_user_id: str,
+) -> dict[str, Any]:
+    """Verwijder een team-lid. Alleen admin. Eigen owner kan niet verwijderd worden."""
+    main = _get_main()
+
+    # Check admin
+    membership_rows = await main.supabase_get(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(admin_user_id, safe='')}&select=role"
+    )
+    if not isinstance(membership_rows, list) or not membership_rows:
+        raise HTTPException(status_code=403, detail="Geen lid van dit team.")
+    if membership_rows[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Alleen admin kan leden verwijderen.")
+
+    # Check team bestaat + of target niet de owner is
+    team_rows = await main.supabase_get(
+        f"/rest/v1/teams?id=eq.{quote(team_id, safe='')}&select=owner_user_id"
+    )
+    if not isinstance(team_rows, list) or not team_rows:
+        raise HTTPException(status_code=404, detail="Team niet gevonden.")
+    if team_rows[0].get("owner_user_id") == target_user_id:
+        raise HTTPException(status_code=400, detail="Kan de team-owner niet verwijderen.")
+
+    # Delete membership
+    await main.supabase_delete(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(target_user_id, safe='')}"
+    )
+
+    # Ontkoppel mailboxen van dit team (niet deleten — user kan ze houden als solo mailbox)
+    await main.supabase_patch(
+        f"/rest/v1/mailboxes?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(target_user_id, safe='')}",
+        {"team_id": None},
+    )
+
+    return {"ok": True, "removed_user_id": target_user_id, "team_id": team_id}
+
+
+async def change_member_role(
+    admin_user_id: str,
+    team_id: str,
+    target_user_id: str,
+    new_role: str,
+) -> dict[str, Any]:
+    """Wijzig de role van een team-lid. Alleen admin."""
+    main = _get_main()
+    if new_role not in ("admin", "member"):
+        raise HTTPException(status_code=400, detail="Role moet 'admin' of 'member' zijn.")
+
+    membership_rows = await main.supabase_get(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(admin_user_id, safe='')}&select=role"
+    )
+    if not isinstance(membership_rows, list) or not membership_rows:
+        raise HTTPException(status_code=403, detail="Geen lid van dit team.")
+    if membership_rows[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Alleen admin kan rollen wijzigen.")
+
+    # Check team bestaat + of target niet owner is (owner blijft altijd admin)
+    team_rows = await main.supabase_get(
+        f"/rest/v1/teams?id=eq.{quote(team_id, safe='')}&select=owner_user_id"
+    )
+    if isinstance(team_rows, list) and team_rows:
+        if team_rows[0].get("owner_user_id") == target_user_id and new_role != "admin":
+            raise HTTPException(status_code=400, detail="Team-owner moet altijd admin blijven.")
+
+    await main.supabase_patch(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(target_user_id, safe='')}",
+        {"role": new_role},
+    )
+    return {"ok": True, "user_id": target_user_id, "role": new_role}
+
+
 async def handle_team_subscription_deleted(data: dict[str, Any]) -> bool:
     """Zet team op canceled. Returns True als team-subscription verwerkt."""
     main = _get_main()
