@@ -4501,7 +4501,16 @@ async def stripe_webhook(request: Request):
         )
 
         event_type = event["type"]
-        data = event["data"]["object"]
+        raw_data = event["data"]["object"]
+
+        # Convert Stripe StripeObject → pure Python dict (JSON roundtrip)
+        # Voorkomt KeyError: 0 bij dict() of iteratie van StripeObject
+        import json as _json
+        try:
+            data = _json.loads(_json.dumps(raw_data, default=lambda o: getattr(o, "to_dict", lambda: dict(o))()))
+        except Exception as exc:
+            print(f"[webhook] failed to normalize event data: {repr(exc)}, falling back to raw")
+            data = raw_data
 
         if event_type == "checkout.session.completed":
             from app import teams as teams_module
