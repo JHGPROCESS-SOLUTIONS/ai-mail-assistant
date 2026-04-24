@@ -6449,6 +6449,34 @@ async def _radar_default_settings() -> dict[str, Any]:
     }
 
 
+@app.get("/api/teams/me")
+async def api_get_my_teams(user: dict[str, Any] = Depends(get_current_user)):
+    """Geeft alle teams terug waar de ingelogde user lid van is."""
+    from app import teams as teams_module
+    return await teams_module.list_teams_for_user(user["id"])
+
+
+class _TeamInvitePayload(BaseModel):
+    team_id: str
+    email: str
+    role: str = "member"
+
+
+@app.post("/api/teams/invite")
+async def api_invite_to_team(
+    body: _TeamInvitePayload,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Nodig een e-mailadres uit voor het opgegeven team. Alleen admin."""
+    from app import teams as teams_module
+    return await teams_module.invite_member_to_team(
+        admin_user_id=user["id"],
+        team_id=body.team_id,
+        invite_email=body.email,
+        role=body.role,
+    )
+
+
 @app.get("/api/radar/overview")
 async def radar_overview(user: dict[str, Any] = Depends(get_current_user)):
     """

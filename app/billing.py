@@ -67,7 +67,7 @@ CANCEL_URL = os.getenv(
 # Separate URL for team success page (lands on team-setup wizard)
 TEAM_SUCCESS_URL = os.getenv(
     "STRIPE_TEAM_SUCCESS_URL",
-    "https://officeflowcompany.com/team/setup",
+    "https://officeflowcompany.com/team.html?welcome=1",
 )
 
 

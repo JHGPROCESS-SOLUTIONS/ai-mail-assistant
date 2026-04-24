@@ -13,6 +13,9 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
+from fastapi import HTTPException
+from pydantic import BaseModel, EmailStr
+
 
 # ---- Team tier config (moet matchen met billing.py) ----
 TEAM_TIER_SEATS: dict[str, int] = {
@@ -297,6 +300,155 @@ async def handle_team_subscription_updated(
     )
     print(f"[teams-webhook] team {team['id']} updated → {normalized_status}, access={access_allowed}")
     return True
+
+
+# ============================================================
+# API ENDPOINTS voor /api/teams/*
+# ============================================================
+
+class TeamInviteBody(BaseModel):
+    team_id: str
+    email: EmailStr
+    role: str = "member"
+
+
+async def _resolve_user_teams(user_id: str) -> list[dict[str, Any]]:
+    """Geeft alle teams waar user lid van is, met role + team-data + members + mailboxes."""
+    main = _get_main()
+    memberships = await main.supabase_get(
+        f"/rest/v1/team_members?user_id=eq.{quote(user_id, safe='')}&select=team_id,role,joined_at"
+    )
+    if not isinstance(memberships, list) or not memberships:
+        return []
+
+    results = []
+    for m in memberships:
+        team_id = m.get("team_id")
+        if not team_id:
+            continue
+
+        team_rows = await main.supabase_get(
+            f"/rest/v1/teams?id=eq.{quote(team_id, safe='')}&select=*"
+        )
+        team = team_rows[0] if isinstance(team_rows, list) and team_rows else None
+        if not team:
+            continue
+
+        # Members + their email from users-table
+        member_rows = await main.supabase_get(
+            f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}&select=user_id,role,joined_at,invited_at"
+        )
+        members = []
+        if isinstance(member_rows, list):
+            for mr in member_rows:
+                uid = mr.get("user_id")
+                if not uid:
+                    continue
+                u_rows = await main.supabase_get(
+                    f"/rest/v1/users?id=eq.{quote(uid, safe='')}&select=id,email,full_name"
+                )
+                u = u_rows[0] if isinstance(u_rows, list) and u_rows else {}
+                members.append({
+                    "user_id": uid,
+                    "email": u.get("email"),
+                    "full_name": u.get("full_name"),
+                    "role": mr.get("role"),
+                    "joined_at": mr.get("joined_at"),
+                    "invited_at": mr.get("invited_at"),
+                })
+
+        # Mailboxes die aan dit team hangen
+        mailbox_rows = await main.supabase_get(
+            f"/rest/v1/mailboxes?team_id=eq.{quote(team_id, safe='')}&select=id,email_address,status,provider,created_at,user_id"
+        )
+        mailboxes = mailbox_rows if isinstance(mailbox_rows, list) else []
+
+        results.append({
+            "team": team,
+            "role": m.get("role"),
+            "members": members,
+            "mailboxes": mailboxes,
+            "seats_used": len(mailboxes),
+            "seats_total": team.get("seats", 0),
+        })
+
+    return results
+
+
+async def list_teams_for_user(user_id: str) -> dict[str, Any]:
+    """Wrapped helper voor de /api/teams/me endpoint in main.py."""
+    teams = await _resolve_user_teams(user_id)
+    return {"teams": teams}
+
+
+async def invite_member_to_team(
+    admin_user_id: str,
+    team_id: str,
+    invite_email: str,
+    role: str = "member",
+) -> dict[str, Any]:
+    """Wrapped helper voor de /api/teams/invite endpoint in main.py.
+    Checkt admin-rechten, maakt user-row + team-membership aan, stuurt welkom-mail."""
+    main = _get_main()
+
+    # Check of admin-user admin is van dit team
+    membership_rows = await main.supabase_get(
+        f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+        f"&user_id=eq.{quote(admin_user_id, safe='')}&select=role"
+    )
+    if not isinstance(membership_rows, list) or not membership_rows:
+        raise HTTPException(status_code=403, detail="Geen lid van dit team.")
+    if membership_rows[0].get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Alleen admin kan leden uitnodigen.")
+
+    # Check team bestaat + access
+    team_rows = await main.supabase_get(
+        f"/rest/v1/teams?id=eq.{quote(team_id, safe='')}&select=*"
+    )
+    if not isinstance(team_rows, list) or not team_rows:
+        raise HTTPException(status_code=404, detail="Team niet gevonden.")
+    team = team_rows[0]
+    if not team.get("access_allowed"):
+        raise HTTPException(status_code=402, detail="Team-abonnement niet actief.")
+
+    invite_email_norm = (invite_email or "").lower().strip()
+    if "@" not in invite_email_norm:
+        raise HTTPException(status_code=400, detail="Ongeldig e-mailadres.")
+
+    # Zoek of user al bestaat in users-tabel
+    existing_user = await main.supabase_get_user_by_email(invite_email_norm)
+    if not existing_user:
+        existing_user = await main.supabase_insert_user(email=invite_email_norm, full_name=None)
+
+    # Voeg toe aan team_members (idempotent)
+    await supabase_add_team_member(
+        team_id=team_id,
+        user_id=existing_user["id"],
+        role=role if role in ("admin", "member") else "member",
+        invited_by=admin_user_id,
+    )
+
+    # Geef deze user ook app-access zodat 'ie kan inloggen + mailbox koppelen
+    await main.supabase_update_user_subscription(
+        user_id=existing_user["id"],
+        subscription_status="active",
+        access_allowed=True,
+        stripe_customer_id=existing_user.get("stripe_customer_id"),
+        stripe_subscription_id=existing_user.get("stripe_subscription_id"),
+    )
+
+    # Stuur Supabase-invite (welkom-mail met set-password link)
+    try:
+        await main.send_welcome_invite(invite_email_norm)
+    except Exception as exc:
+        print(f"[teams-invite] welcome mail failed for {invite_email_norm}: {repr(exc)}")
+
+    return {
+        "ok": True,
+        "invited_email": invite_email_norm,
+        "team_id": team_id,
+        "role": role,
+    }
 
 
 async def handle_team_subscription_deleted(data: dict[str, Any]) -> bool:
