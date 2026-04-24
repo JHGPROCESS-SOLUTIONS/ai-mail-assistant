@@ -16,11 +16,18 @@ from urllib.parse import quote
 from fastapi import HTTPException
 
 
-# ---- Team tier config (moet matchen met billing.py) ----
+# ---- Team tier config (moet matchen met billing.py + marketing copy) ----
 TEAM_TIER_SEATS: dict[str, int] = {
     "team_s": 3,
     "team_pro": 10,
     "business": 25,
+}
+
+# Max aantal team-leden per tier. None = onbeperkt.
+TEAM_TIER_MEMBER_LIMITS: dict[str, int | None] = {
+    "team_s": 5,
+    "team_pro": 20,
+    "business": None,  # onbeperkt
 }
 
 ALLOWED_TEAM_STATUSES = {"active", "trialing", "canceling"}
@@ -407,6 +414,37 @@ async def invite_member_to_team(
     invite_email_norm = (invite_email or "").lower().strip()
     if "@" not in invite_email_norm:
         raise HTTPException(status_code=400, detail="Ongeldig e-mailadres.")
+
+    # --- Tier-based member-limit enforcement --------------------
+    tier = (team.get("tier") or "").lower()
+    member_limit = TEAM_TIER_MEMBER_LIMITS.get(tier)
+    if member_limit is not None:
+        # Tel huidige leden in dit team
+        existing_members = await main.supabase_get(
+            f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}&select=user_id"
+        )
+        current_count = len(existing_members) if isinstance(existing_members, list) else 0
+
+        # Check of invite-email al lid is (herinvites mogen)
+        existing_user_check = await main.supabase_get_user_by_email(invite_email_norm)
+        already_member = False
+        if existing_user_check:
+            already_rows = await main.supabase_get(
+                f"/rest/v1/team_members?team_id=eq.{quote(team_id, safe='')}"
+                f"&user_id=eq.{quote(existing_user_check['id'], safe='')}&select=user_id"
+            )
+            already_member = isinstance(already_rows, list) and len(already_rows) > 0
+
+        if not already_member and current_count >= member_limit:
+            tier_labels = {"team_s": "Team Starter", "team_pro": "Team Pro", "business": "Business"}
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Ledenlimiet bereikt voor {tier_labels.get(tier, tier)} "
+                    f"({current_count}/{member_limit}). Upgrade naar een hoger tier om meer leden toe te voegen."
+                ),
+            )
+    # ------------------------------------------------------------
 
     # Zoek of user al bestaat in users-tabel
     existing_user = await main.supabase_get_user_by_email(invite_email_norm)
