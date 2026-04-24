@@ -4504,6 +4504,16 @@ async def stripe_webhook(request: Request):
         data = event["data"]["object"]
 
         if event_type == "checkout.session.completed":
+            from app import teams as teams_module
+
+            session_metadata = stripe_obj_get(data, "metadata") or {}
+
+            # Team checkout? Route naar teams.py — creëert team + membership
+            if teams_module.is_team_checkout(session_metadata):
+                await teams_module.handle_team_checkout_completed(data)
+                return {"received": True}
+
+            # Solo checkout (bestaand gedrag)
             email = (
                 stripe_obj_get(data, "customer_email")
                 or stripe_obj_get(data, "client_reference_id")
@@ -4527,10 +4537,22 @@ async def stripe_webhook(request: Request):
             )
 
         elif event_type == "customer.subscription.updated":
+            from app import teams as teams_module
+
+            cancel_at_period_end = bool(stripe_obj_get(data, "cancel_at_period_end", False))
+
+            # Team-subscription? → route eerst daarheen; als handled, stop
+            team_handled = await teams_module.handle_team_subscription_updated(
+                data,
+                cancel_at_period_end=cancel_at_period_end,
+            )
+            if team_handled:
+                return {"received": True}
+
+            # Solo-subscription (bestaand gedrag)
             status = stripe_obj_get(data, "status")
             customer_id = stripe_obj_get(data, "customer")
             subscription_id = stripe_obj_get(data, "id")
-            cancel_at_period_end = bool(stripe_obj_get(data, "cancel_at_period_end", False))
 
             if customer_id:
                 user = await supabase_get_user_by_stripe_customer_id(customer_id)
@@ -4562,6 +4584,14 @@ async def stripe_webhook(request: Request):
                         )
 
         elif event_type == "customer.subscription.deleted":
+            from app import teams as teams_module
+
+            # Team-subscription? → route daarheen
+            team_handled = await teams_module.handle_team_subscription_deleted(data)
+            if team_handled:
+                return {"received": True}
+
+            # Solo-subscription (bestaand gedrag)
             customer_id = stripe_obj_get(data, "customer")
             subscription_id = stripe_obj_get(data, "id")
 
