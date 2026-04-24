@@ -199,11 +199,12 @@ def create_stripe_checkout_session(plan: str, email: str):
 def create_team_stripe_checkout_session(
     tier: str,
     billing_period: str,
-    email: str,
+    email: str | None = None,
     team_name: str | None = None,
 ):
     """Team-tier checkout. Metadata bevat tier + seats zodat de webhook
-    weet dat dit een TEAM subscription is en de juiste Supabase-inserts doet."""
+    weet dat dit een TEAM subscription is en de juiste Supabase-inserts doet.
+    Email is optioneel — Stripe vraagt 'm anders zelf op de checkout-pagina."""
     require_stripe()
 
     price_id, seats = get_team_price_id(tier, billing_period)
@@ -216,29 +217,32 @@ def create_team_stripe_checkout_session(
         line_item["tax_rates"] = [TAX_RATE_NL]
 
     metadata = {
-        "email": email,
         "product_family": "officeflow_team",
         "tier": tier,
         "seats": str(seats),
         "billing_period": billing_period,
-        "team_name": (team_name or "").strip()[:100] or email,
+        "team_name": (team_name or "").strip()[:100] or (email or "Team"),
+    }
+    if email:
+        metadata["email"] = email
+
+    session_params: dict = {
+        "payment_method_types": ["card", "ideal", "bancontact"],
+        "mode": "subscription",
+        "line_items": [line_item],
+        "success_url": TEAM_SUCCESS_URL,
+        "cancel_url": CANCEL_URL,
+        "allow_promotion_codes": True,
+        "metadata": metadata,
+        "subscription_data": {"metadata": metadata},
     }
 
+    if email:
+        session_params["customer_email"] = email
+        session_params["client_reference_id"] = email
+
     try:
-        session = stripe.checkout.Session.create(
-            payment_method_types=["card", "ideal", "bancontact"],
-            mode="subscription",
-            line_items=[line_item],
-            success_url=TEAM_SUCCESS_URL,
-            cancel_url=CANCEL_URL,
-            customer_email=email,
-            client_reference_id=email,
-            allow_promotion_codes=True,
-            metadata=metadata,
-            subscription_data={
-                "metadata": metadata,
-            },
-        )
+        session = stripe.checkout.Session.create(**session_params)
         return session
 
     except HTTPException:
@@ -294,7 +298,7 @@ async def create_team_checkout_session(
     email: str | None = None,
     team_name: str | None = None,
 ):
-    normalized_email = normalize_email(email)
+    normalized_email = normalize_email(email) if email else None
     normalized_tier = normalize_team_tier(tier)
     normalized_period = normalize_billing_period(billing_period)
 
@@ -315,7 +319,7 @@ async def start_team_checkout(
     email: str | None = Query(default=None),
     team_name: str | None = Query(default=None),
 ):
-    normalized_email = normalize_email(email)
+    normalized_email = normalize_email(email) if email else None
     normalized_tier = normalize_team_tier(tier)
     normalized_period = normalize_billing_period(billing_period)
 
