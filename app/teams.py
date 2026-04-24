@@ -14,7 +14,6 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import HTTPException
-from pydantic import BaseModel, EmailStr
 
 
 # ---- Team tier config (moet matchen met billing.py) ----
@@ -305,12 +304,6 @@ async def handle_team_subscription_updated(
 # ============================================================
 # API ENDPOINTS voor /api/teams/*
 # ============================================================
-
-class TeamInviteBody(BaseModel):
-    team_id: str
-    email: EmailStr
-    role: str = "member"
-
 
 async def _resolve_user_teams(user_id: str) -> list[dict[str, Any]]:
     """Geeft alle teams waar user lid van is, met role + team-data + members + mailboxes."""
