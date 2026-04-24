@@ -4506,20 +4506,31 @@ async def stripe_webhook(request: Request):
         if event_type == "checkout.session.completed":
             from app import teams as teams_module
 
-            # Normaliseer metadata naar dict voor veilige .get() calls
-            raw_md = stripe_obj_get(data, "metadata") or {}
-            session_metadata = dict(raw_md) if raw_md else {}
+            # Route team-checkout naar teams.py — alle error-handling in try/except
+            try:
+                raw_md = stripe_obj_get(data, "metadata") or {}
+                # Safe convert: itereer key-voor-key in plaats van dict(raw_md)
+                session_metadata: dict[str, Any] = {}
+                if raw_md:
+                    try:
+                        for k in list(raw_md.keys() if hasattr(raw_md, "keys") else []):
+                            session_metadata[str(k)] = raw_md[k]
+                    except Exception:
+                        # Fallback: als iteratie faalt, probeer attr-access
+                        for k in ("product_family", "tier", "seats", "billing_period", "email", "team_name"):
+                            val = stripe_obj_get(raw_md, k)
+                            if val is not None:
+                                session_metadata[k] = val
 
-            # Team checkout? Route naar teams.py — creëert team + membership
-            if teams_module.is_team_checkout(session_metadata):
-                try:
+                if teams_module.is_team_checkout(session_metadata):
                     await teams_module.handle_team_checkout_completed(data)
-                except Exception as exc:
-                    import traceback
-                    print(f"[teams-webhook] FAILED: {repr(exc)}")
-                    print(traceback.format_exc())
-                    raise
-                return {"received": True}
+                    return {"received": True}
+            except Exception as exc:
+                import traceback
+                print(f"[teams-webhook] FAILED in team-route: {repr(exc)}")
+                print(traceback.format_exc())
+                # Niet re-raisen — laat solo-logica hieronder ook kansen krijgen
+                # (maar de team is niet aangemaakt; check logs om te fixen)
 
             # Solo checkout (bestaand gedrag)
             email = (
