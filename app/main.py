@@ -4506,31 +4506,31 @@ async def stripe_webhook(request: Request):
         if event_type == "checkout.session.completed":
             from app import teams as teams_module
 
-            # Route team-checkout naar teams.py — alle error-handling in try/except
+            # Harvest metadata keys defensief — probeer alle mogelijke paden
+            session_metadata: dict[str, Any] = {}
             try:
-                raw_md = stripe_obj_get(data, "metadata") or {}
-                # Safe convert: itereer key-voor-key in plaats van dict(raw_md)
-                session_metadata: dict[str, Any] = {}
-                if raw_md:
-                    try:
-                        for k in list(raw_md.keys() if hasattr(raw_md, "keys") else []):
-                            session_metadata[str(k)] = raw_md[k]
-                    except Exception:
-                        # Fallback: als iteratie faalt, probeer attr-access
-                        for k in ("product_family", "tier", "seats", "billing_period", "email", "team_name"):
-                            val = stripe_obj_get(raw_md, k)
-                            if val is not None:
-                                session_metadata[k] = val
+                for k in ("product_family", "tier", "seats", "billing_period", "email", "team_name"):
+                    raw_md = stripe_obj_get(data, "metadata")
+                    if raw_md is None:
+                        break
+                    val = stripe_obj_get(raw_md, k)
+                    if val is not None:
+                        session_metadata[k] = val
+                print(f"[teams-webhook] extracted metadata: {session_metadata}")
+            except Exception as exc:
+                print(f"[teams-webhook] metadata extract failed: {repr(exc)}")
 
-                if teams_module.is_team_checkout(session_metadata):
+            # Team checkout? Route naar teams.py
+            if teams_module.is_team_checkout(session_metadata):
+                try:
                     await teams_module.handle_team_checkout_completed(data)
                     return {"received": True}
-            except Exception as exc:
-                import traceback
-                print(f"[teams-webhook] FAILED in team-route: {repr(exc)}")
-                print(traceback.format_exc())
-                # Niet re-raisen — laat solo-logica hieronder ook kansen krijgen
-                # (maar de team is niet aangemaakt; check logs om te fixen)
+                except Exception as exc:
+                    import traceback
+                    print(f"[teams-webhook] FAILED in team-route: {repr(exc)}")
+                    print(traceback.format_exc())
+                    # Niet re-raisen — laat solo-logica hieronder niet lopen bij team-checkouts
+                    return {"received": True, "team_error": str(exc)}
 
             # Solo checkout (bestaand gedrag)
             email = (
