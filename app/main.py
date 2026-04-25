@@ -3861,6 +3861,14 @@ async def google_callback(code: str):
         first_draft_generated=False,
     )
 
+    # Voor team-mailboxen: terug naar team-dashboard zodat admin/lid de
+    # nieuwe mailbox direct in de sidebar ziet. Solo blijft via onboarding.
+    if team_id_for_mailbox:
+        return RedirectResponse(
+            url="https://officeflowcompany.com/team.html?welcome=connected",
+            status_code=302,
+        )
+
     return RedirectResponse(
         url=f"https://officeflowcompany.com/onboarding/preferences.html?email={quote(user_email)}",
         status_code=302,
