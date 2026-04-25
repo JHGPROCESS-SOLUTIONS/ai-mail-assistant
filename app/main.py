@@ -4694,15 +4694,18 @@ async def stripe_webhook(request: Request):
                     return {"received": True, "team_error": str(exc)}
 
             # Solo checkout (bestaand gedrag)
+            customer_details = stripe_obj_get(data, "customer_details") or {}
             email = (
                 stripe_obj_get(data, "customer_email")
                 or stripe_obj_get(data, "client_reference_id")
+                or stripe_obj_get(customer_details, "email")
             )
             customer_id = stripe_obj_get(data, "customer")
             subscription_id = stripe_obj_get(data, "subscription")
 
             if not email:
                 return {"received": True}
+            email = email.strip().lower()
 
             user = await supabase_get_user_by_email(email)
             if not user:

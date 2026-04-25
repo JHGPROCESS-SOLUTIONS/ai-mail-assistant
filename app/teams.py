@@ -192,14 +192,20 @@ async def handle_team_checkout_completed(data: dict[str, Any]) -> None:
     raw_metadata = stripe_obj_get(data, "metadata") or {}
     metadata: dict[str, Any] = dict(raw_metadata) if raw_metadata else {}
 
+    # Stripe vult customer_details.email automatisch in als de gebruiker
+    # 'm op de checkout-pagina zelf invult. customer_email is alleen gezet
+    # als wij 'm vooraf meegaven aan de Session.create call.
+    customer_details = stripe_obj_get(data, "customer_details") or {}
     email = (
         stripe_obj_get(data, "customer_email")
         or stripe_obj_get(data, "client_reference_id")
         or metadata.get("email")
+        or stripe_obj_get(customer_details, "email")
     )
     if not email:
         print("[teams-webhook] no email on team checkout — skipping")
         return
+    email = email.strip().lower()
 
     customer_id = stripe_obj_get(data, "customer")
     subscription_id = stripe_obj_get(data, "subscription")
