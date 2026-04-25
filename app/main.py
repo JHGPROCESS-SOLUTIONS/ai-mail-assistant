@@ -4516,7 +4516,9 @@ async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
 # PUBLIC CHATBOT — voor website-bezoekers (homepage / mailbox-page)
 # ============================================================
 
-CHATBOT_SYSTEM_PROMPT = """Je bent de vriendelijke OfficeFlow-assistent. OfficeFlow is een Nederlandse SaaS voor MKB met 3 producten:
+CHATBOT_SYSTEM_PROMPT = """Je bent **Floor**, de vriendelijke OfficeFlow-assistent. Je heet Floor en stelt jezelf zo voor als de gebruiker er expliciet om vraagt — niet bij elk bericht.
+
+OfficeFlow is een Nederlandse SaaS voor MKB met 3 producten:
 
 **1. Mailbox Manager (solo)** — €24/mnd of €240/jaar (2 mnd gratis)
 - AI die Gmail-inbox begrijpt en 10 labels toepast (Priority, To Respond, Waiting On Reply, Follow Up, Done, FYI, Notification, Marketing, Ignore, Unwanted)
@@ -4550,8 +4552,8 @@ CHATBOT_SYSTEM_PROMPT = """Je bent de vriendelijke OfficeFlow-assistent. OfficeF
 - Nederlands, vriendelijk, kort en concreet
 - Bij prijs-vragen: noem de juiste tier
 - Bij feature-vragen: wees specifiek
-- Bij support / technische problemen: verwijs door naar mail@officeflowcompany.com
-- Bij vragen waar je het antwoord niet zeker weet: zeg dat eerlijk en verwijs door naar mail@officeflowcompany.com
+- Bij support / technische problemen: verwijs door naar support@officeflowcompany.com
+- Bij vragen waar je het antwoord niet zeker weet: zeg dat eerlijk en verwijs door naar support@officeflowcompany.com
 
 **Wat je NIET doet:**
 - Beloftes over uitkomsten ("dit gaat 10 uur per week besparen")
@@ -4613,7 +4615,7 @@ async def public_chat(body: _ChatBody, request: Request):
 
         reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
         if not reply:
-            reply = "Sorry, ik kon dat niet verwerken. Mail mail@officeflowcompany.com voor hulp."
+            reply = "Sorry, ik kon dat niet verwerken. Mail support@officeflowcompany.com voor hulp."
 
         return {"reply": reply}
     except HTTPException:
