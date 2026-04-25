@@ -4512,6 +4512,117 @@ async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
     }
 
 
+# ============================================================
+# PUBLIC CHATBOT — voor website-bezoekers (homepage / mailbox-page)
+# ============================================================
+
+CHATBOT_SYSTEM_PROMPT = """Je bent de vriendelijke OfficeFlow-assistent. OfficeFlow is een Nederlandse SaaS voor MKB met 3 producten:
+
+**1. Mailbox Manager (solo)** — €24/mnd of €240/jaar (2 mnd gratis)
+- AI die Gmail-inbox begrijpt en 10 labels toepast (Priority, To Respond, Waiting On Reply, Follow Up, Done, FYI, Notification, Marketing, Ignore, Unwanted)
+- Concept-antwoorden in jouw eigen schrijfstijl
+- Follow-Up Radar (opvolg-concepten voor stille threads + open beloftes)
+- Auto-archive optioneel
+- Werkt IN Gmail — geen nieuwe app
+- NOOIT auto-send. Drafts zijn altijd suggesties.
+- Werkt nu alleen met Gmail; Outlook staat op de roadmap
+
+**2. Mailbox Manager Teams** — voor bedrijven met meerdere inboxen
+- Team Starter: €59/mnd, 3 mailboxen, tot 5 team-leden
+- Team Pro: €149/mnd, 10 mailboxen, tot 20 leden, priority support
+- Business: €299/mnd, 25 mailboxen, onbeperkt leden, API + SLA + dedicated manager
+- Gedeeld dashboard, één factuur, per lid eigen stijlprofiel
+- Gedeelde inboxen (info@, verkoop@) ondersteund
+
+**3. Facturen & Offertes** — €19-89/mnd
+- Compleet platform: offerte → factuur → werkregistratie → Moneybird-sync
+- Voor Nederlandse Moneybird-gebruikers
+- Abonnementen + terugkerende facturen + automatische betalingsopvolging
+
+**Status (belangrijk):**
+- Mailbox Manager wordt op dit moment door Google geverifieerd. Aanmelden kan, maar gebruikers krijgen een "niet-geverifieerd" waarschuwing tijdens OAuth — klik op "Geavanceerd" → "Doorgaan naar OfficeFlow" om verder te gaan.
+- Betaalmethoden: iDEAL, Bancontact, Kaart, Apple Pay
+- BTW 21% wordt automatisch toegevoegd via Stripe
+- Alle abonnementen maandelijks opzegbaar
+- Data: hosting in EU, AVG-conform
+
+**Hoe je antwoordt:**
+- Nederlands, vriendelijk, kort en concreet
+- Bij prijs-vragen: noem de juiste tier
+- Bij feature-vragen: wees specifiek
+- Bij support / technische problemen: verwijs door naar mail@officeflowcompany.com
+- Bij vragen waar je het antwoord niet zeker weet: zeg dat eerlijk en verwijs door naar mail@officeflowcompany.com
+
+**Wat je NIET doet:**
+- Beloftes over uitkomsten ("dit gaat 10 uur per week besparen")
+- Korting geven of beloven
+- Persoonlijke info opvragen
+- Concurrenten benoemen of vergelijken
+- Klagen of meegaan in negatieve reviews
+- Drafts van klantmails schrijven (dat doet OfficeFlow zelf in Gmail)
+
+Houd antwoorden onder de 4 zinnen tenzij de vraag echt om uitleg vraagt."""
+
+
+class _ChatMessage(BaseModel):
+    role: str  # 'user' | 'assistant'
+    content: str
+
+
+class _ChatBody(BaseModel):
+    message: str
+    history: list[_ChatMessage] = []
+
+
+@app.post("/api/chat")
+async def public_chat(body: _ChatBody, request: Request):
+    """Public chatbot endpoint — geen auth nodig.
+    Beperkt: max 500 chars per message, max 10 turns history."""
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    user_message = (body.message or "").strip()[:500]
+    if not user_message:
+        raise HTTPException(status_code=400, detail="Bericht is leeg.")
+
+    # Bouw chat-history op (max 10 turns)
+    msgs: list[dict[str, str]] = [{"role": "system", "content": CHATBOT_SYSTEM_PROMPT}]
+    for h in (body.history or [])[-10:]:
+        if h.role in ("user", "assistant") and h.content:
+            msgs.append({"role": h.role, "content": h.content[:500]})
+    msgs.append({"role": "user", "content": user_message})
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            res = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": msgs,
+                    "max_tokens": 300,
+                    "temperature": 0.4,
+                },
+            )
+        data = res.json()
+        if res.status_code >= 400:
+            print(f"[chatbot] OpenAI error: {data}")
+            raise HTTPException(status_code=502, detail="AI-service niet bereikbaar.")
+
+        reply = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        if not reply:
+            reply = "Sorry, ik kon dat niet verwerken. Mail mail@officeflowcompany.com voor hulp."
+
+        return {"reply": reply}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(f"[chatbot] failed: {repr(exc)}")
+        raise HTTPException(status_code=500, detail="Iets ging mis. Probeer opnieuw.")
+
+
 @app.post("/webhooks/stripe")
 async def stripe_webhook(request: Request):
     webhook_secret = require_env(STRIPE_WEBHOOK_SECRET, "STRIPE_WEBHOOK_SECRET")
