@@ -908,13 +908,30 @@ async def ensure_user_has_access(email: str) -> dict[str, Any]:
     subscription_status = user.get("subscription_status")
     has_access_columns = ("access_allowed" in user) or ("subscription_status" in user)
 
+    # Solo-pad: directe toegang via subscription_status / access_allowed
+    solo_access = True
     if has_access_columns:
         if access_allowed is False:
-            raise HTTPException(status_code=403, detail="Active subscription required")
+            solo_access = False
         if subscription_status and subscription_status not in ALLOWED_SUBSCRIPTION_STATUSES:
-            raise HTTPException(status_code=403, detail="Active subscription required")
+            solo_access = False
 
-    return user
+    if solo_access:
+        return user
+
+    # Team-pad: user heeft geen eigen solo-abonnement, maar mogelijk wel
+    # toegang via een actief team waarvan hij lid is.
+    try:
+        from app import teams as teams_module
+        user_teams = await teams_module._resolve_user_teams(user["id"])
+        for t in user_teams:
+            team = t.get("team") or {}
+            if team.get("access_allowed") and team.get("subscription_status") in ALLOWED_SUBSCRIPTION_STATUSES:
+                return user
+    except Exception as exc:
+        print(f"[ensure_user_has_access] team-check failed for {email}: {repr(exc)}")
+
+    raise HTTPException(status_code=403, detail="Active subscription required")
 
 
 async def get_user_for_billing(email: str) -> dict[str, Any]:
