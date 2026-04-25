@@ -261,6 +261,23 @@ async def handle_team_checkout_completed(data: dict[str, Any]) -> None:
         mark_joined=True,
     )
 
+    # 5. Stuur welkom-mail met set-password link (best-effort)
+    # Owner heeft net betaald maar nog geen account credentials. Zonder
+    # deze mail kan hij niet inloggen op /team.html. Skip als al verstuurd.
+    try:
+        invite_already_sent = bool(user.get("invite_sent_at"))
+        if not invite_already_sent:
+            invited = await main.send_welcome_invite(email)
+            if invited:
+                from urllib.parse import quote
+                await main.supabase_patch(
+                    f"/rest/v1/users?id=eq.{quote(user['id'], safe='')}",
+                    {"invite_sent_at": main.utc_now_iso()},
+                )
+                print(f"[teams-webhook] welcome invite sent to {email}")
+    except Exception as exc:
+        print(f"[teams-webhook] welcome invite skipped for {email}: {repr(exc)}")
+
 
 async def handle_team_subscription_updated(
     data: dict[str, Any],
