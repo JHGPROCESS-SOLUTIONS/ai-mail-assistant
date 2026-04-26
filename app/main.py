@@ -4322,6 +4322,88 @@ async def train_style_profile(
 
 
 # ---------------------------------------------------------------------------
+# CRON: hertrainen van stijlprofielen (maandelijks)
+# ---------------------------------------------------------------------------
+
+@app.post("/internal/style-profile/retrain-stale")
+async def retrain_stale_style_profiles(
+    age_days: int = 30,
+    max_per_run: int = 50,
+):
+    """
+    Hertraint stijlprofielen die ouder zijn dan `age_days` dagen, voor users
+    met style_learning_enabled=True. Bedoeld om periodiek (maandelijks) door
+    een cron-job te worden aangeroepen.
+
+    Veiligheden:
+    - max_per_run cap voorkomt dat 1 batch alle Gmail/OpenAI quota opmaakt
+    - per-user try/except: 1 fout breekt de batch niet
+    - users zonder bestaand profiel worden ook hertraind (eerste keer)
+    """
+    try:
+        users_settings = await supabase_get(
+            "/rest/v1/user_settings"
+            "?style_learning_enabled=eq.true"
+            "&select=user_id,style_learning_source_limit"
+            f"&limit={max_per_run * 5}"
+        )
+    except Exception as exc:
+        print(f"[retrain-stale] settings fetch failed: {repr(exc)}")
+        return {"status": "error", "error": "settings_fetch_failed"}
+
+    if not isinstance(users_settings, list):
+        return {"status": "ok", "retrained": 0, "skipped": 0, "total_users_checked": 0}
+
+    threshold_iso = (_dt.now(_tz.utc) - _td(days=age_days)).isoformat()
+    retrained = 0
+    skipped_fresh = 0
+    failed = 0
+
+    for s in users_settings:
+        if retrained >= max_per_run:
+            break
+        user_id = s.get("user_id")
+        if not user_id:
+            continue
+        try:
+            existing = await supabase_get_user_style_profile(user_id)
+            updated_at = None
+            if existing:
+                updated_at = existing.get("updated_at") or existing.get("created_at")
+
+            if existing and updated_at and updated_at > threshold_iso:
+                skipped_fresh += 1
+                continue
+
+            await train_style_profile_from_sent_messages(
+                user_id=user_id,
+                source_limit=s.get("style_learning_source_limit") or 20,
+            )
+            retrained += 1
+            print(f"[retrain-stale] retrained user_id={user_id}")
+        except HTTPException as http_exc:
+            # bv. 'Not enough usable sent emails' — geen kritiek, log + door
+            failed += 1
+            print(f"[retrain-stale] user {user_id} skipped (HTTP): {http_exc.detail}")
+            continue
+        except Exception as exc:
+            failed += 1
+            print(f"[retrain-stale] user {user_id} failed: {repr(exc)}")
+            continue
+
+    summary = {
+        "status": "ok",
+        "retrained": retrained,
+        "skipped_fresh": skipped_fresh,
+        "failed": failed,
+        "total_users_checked": len(users_settings),
+        "age_threshold_days": age_days,
+    }
+    print(f"[retrain-stale] done: {summary}")
+    return summary
+
+
+# ---------------------------------------------------------------------------
 # Subscription management (dashboard)
 # ---------------------------------------------------------------------------
 
