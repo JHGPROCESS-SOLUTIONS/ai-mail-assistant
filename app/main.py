@@ -7262,19 +7262,81 @@ async def api_recent_drafts(
     if limit > 50:
         limit = 50
 
+    # Pull a wider window than `limit` so live-Gmail filtering of stale drafts
+    # still leaves enough rows to fill the dashboard list.
+    fetch_limit = max(limit * 3, 60)
     try:
         drafts_rows = await supabase_get(
             "/rest/v1/drafts"
             f"?user_id=eq.{quote(user_id, safe='')}"
             f"&select=id,email_id,subject,confidence,status,gmail_draft_id,created_at"
             f"&order=created_at.desc"
-            f"&limit={limit}"
+            f"&limit={fetch_limit}"
         )
     except Exception as exc:
         print(f"[recent-drafts] drafts fetch failed: {repr(exc)}")
         raise HTTPException(status_code=500, detail="Kon concepten niet ophalen")
 
     drafts_rows = drafts_rows or []
+
+    # Drop drafts already marked deleted/sent from a previous round.
+    drafts_rows = [
+        d for d in drafts_rows
+        if (d.get("status") or "").lower() not in ("deleted", "sent")
+    ]
+
+    # Live-check: ask Gmail which drafts still exist for this user. One call
+    # to /drafts (maxResults=500) is enough to cover any realistic inbox.
+    # Drafts the user deleted manually OR sent disappear from this list, so
+    # we filter our DB rows accordingly. Best-effort — if Gmail fails, we
+    # show what we have.
+    valid_gmail_draft_ids: set[str] | None = None
+    try:
+        gmail_drafts_resp = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/drafts",
+            params={"maxResults": 500},
+        )
+        if isinstance(gmail_drafts_resp, dict):
+            valid_gmail_draft_ids = {
+                d.get("id")
+                for d in (gmail_drafts_resp.get("drafts") or [])
+                if d.get("id")
+            }
+    except Exception as exc:
+        print(f"[recent-drafts] gmail drafts list failed: {repr(exc)}")
+
+    if valid_gmail_draft_ids is not None:
+        fresh_rows: list[dict[str, Any]] = []
+        stale_db_ids: list[str] = []
+        for draft in drafts_rows:
+            gid = draft.get("gmail_draft_id")
+            # Drafts without a gmail_draft_id are old/legacy rows — keep them
+            # so they don't silently disappear from the UI. Only drafts that
+            # had a Gmail-id but are no longer there get filtered out.
+            if gid and gid not in valid_gmail_draft_ids:
+                if draft.get("id"):
+                    stale_db_ids.append(draft["id"])
+            else:
+                fresh_rows.append(draft)
+        drafts_rows = fresh_rows
+
+        # Persist the 'deleted' status so future calls skip these without
+        # needing to ask Gmail again.
+        if stale_db_ids:
+            try:
+                in_clause = ",".join(quote(sid, safe="") for sid in stale_db_ids)
+                await supabase_patch(
+                    f"/rest/v1/drafts?id=in.({in_clause})",
+                    {"status": "deleted"},
+                )
+                print(f"[recent-drafts] marked {len(stale_db_ids)} drafts as deleted")
+            except Exception as exc:
+                print(f"[recent-drafts] mark-deleted failed: {repr(exc)}")
+
+    # Cap to requested limit AFTER filtering so the user always gets the
+    # freshest N drafts that still exist.
+    drafts_rows = drafts_rows[:limit]
 
     # Pull the email rows we need so we can attach thread/message ids to
     # each draft. One batched query keeps this cheap even for limit=50.
