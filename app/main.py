@@ -4516,12 +4516,49 @@ async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
         except Exception:
             continue
 
-    # statuslabels leven in Gmail, niet in Supabase -> null/0 zodat frontend "--" toont
+    # statuslabels leven in Gmail — live ophalen via labels.get per label.
+    # Gemiddeld kost dat ~5 Gmail API-calls per dashboard-load. Gemakkelijk
+    # binnen quota. Alle calls zijn parallel (asyncio.gather).
     priority_caught_pct: int | None = None
-    fast_reply_pct: int | None = None
+    fast_reply_pct: int | None = None  # vereist reply-timing analyse, voor later
     followup_active = 0
     waiting_reply = 0
     spam_filtered = 0
+
+    try:
+        all_labels = await get_all_gmail_labels(user_id)
+    except Exception as exc:
+        print(f"[stats-overview] gmail labels list failed: {repr(exc)}")
+        all_labels = {}
+
+    async def _label_thread_count(label_name: str) -> int:
+        meta = all_labels.get(label_name)
+        if not meta or not meta.get("id"):
+            return 0
+        try:
+            full = await gmail_get_json_for_user(
+                user_id=user_id,
+                url=f"{GMAIL_API_BASE}/labels/{meta['id']}",
+            )
+            return int(full.get("threadsTotal") or 0) if isinstance(full, dict) else 0
+        except Exception as exc:
+            print(f"[stats-overview] label '{label_name}' fetch failed: {repr(exc)}")
+            return 0
+
+    if all_labels:
+        try:
+            marketing_n, ignore_n, unwanted_n, followup_n, waiting_n = await asyncio.gather(
+                _label_thread_count("Marketing"),
+                _label_thread_count("Ignore"),
+                _label_thread_count("Unwanted"),
+                _label_thread_count("Follow Up"),
+                _label_thread_count("Waiting On Reply"),
+            )
+            spam_filtered = marketing_n + ignore_n + unwanted_n
+            followup_active = followup_n
+            waiting_reply = waiting_n
+        except Exception as exc:
+            print(f"[stats-overview] label-counts gather failed: {repr(exc)}")
 
     return {
         "time_saved_minutes": time_saved_minutes,
