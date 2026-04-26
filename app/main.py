@@ -7263,8 +7263,9 @@ async def api_recent_drafts(
         limit = 50
 
     # Pull a wider window than `limit` so live-Gmail filtering of stale drafts
-    # still leaves enough rows to fill the dashboard list.
-    fetch_limit = max(limit * 3, 60)
+    # still leaves enough rows to fill the dashboard list AND we can return
+    # an accurate `active_count` for the WACHTEND-badge on the dashboard.
+    fetch_limit = 500
     try:
         drafts_rows = await supabase_get(
             "/rest/v1/drafts"
@@ -7334,6 +7335,10 @@ async def api_recent_drafts(
             except Exception as exc:
                 print(f"[recent-drafts] mark-deleted failed: {repr(exc)}")
 
+    # True count of active drafts after Gmail-filter — drives the WACHTEND
+    # badge + sidebar counters, regardless of display limit.
+    active_count = len(drafts_rows)
+
     # Cap to requested limit AFTER filtering so the user always gets the
     # freshest N drafts that still exist.
     drafts_rows = drafts_rows[:limit]
@@ -7385,6 +7390,7 @@ async def api_recent_drafts(
         "status": "ok",
         "items": items,
         "total": len(items),
+        "active_count": active_count,
         "confidence_counts": confidence_counts,
     }
 
