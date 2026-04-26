@@ -266,6 +266,24 @@ class PromptSettingsPayload(BaseModel):
     style_learning_source_limit: int = 20
 
 
+class PromptSettingsBody(BaseModel):
+    """JWT-auth variant: same fields as PromptSettingsPayload but no email
+    (it comes from the bearer token via get_current_user)."""
+    preferred_language: str | None = None
+    tone_preference: str | None = None
+    formality: str | None = None
+    length_preference: str | None = None
+    emoji_preference: bool | None = None
+    cta_preference: str | None = None
+    signature_mode: str | None = None
+    signature_text: str | None = None
+    forbidden_phrases: list[str] | str | None = None
+    preferred_phrases: list[str] | str | None = None
+    custom_instructions: str | None = None
+    style_learning_enabled: bool = False
+    style_learning_source_limit: int = 20
+
+
 class OnboardingCompletePayload(BaseModel):
     email: str
 
@@ -4118,6 +4136,38 @@ async def save_prompt_settings(payload: PromptSettingsPayload):
         "email": payload.email,
         "settings": saved,
     }
+
+
+# ---------------------------------------------------------------------------
+# JWT-auth variants for the dashboard Voorkeuren-tab (no email in body)
+# ---------------------------------------------------------------------------
+
+@app.get("/api/preferences/me")
+async def api_get_my_preferences(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return current user_settings for the logged-in user."""
+    settings = await supabase_get_user_settings(user["id"])
+    return {"status": "ok", "settings": settings or {}}
+
+
+@app.patch("/api/preferences/me")
+async def api_update_my_preferences(
+    body: PromptSettingsBody,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Update user_settings for the logged-in user. Same shape as the
+    onboarding endpoint, just authenticated via Supabase JWT instead of email."""
+    full_payload = PromptSettingsPayload(
+        email=user.get("email", ""),
+        **body.model_dump(),
+    )
+    clean = build_clean_settings_payload(full_payload)
+    saved = await supabase_upsert_user_settings(
+        user_id=user["id"],
+        payload=clean,
+    )
+    return {"status": "ok", "settings": saved}
 
 
 @app.post("/onboarding/complete")
