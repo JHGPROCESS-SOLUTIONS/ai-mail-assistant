@@ -3365,6 +3365,9 @@ async def process_inbox_for_user(
     #   with labels and drafts on their actual recent inbox, instead of an
     #   empty dashboard while they wait for new mail to arrive.
     if initial_run:
+        # Initial onboarding run: skip the cutoff filter entirely so brand-new
+        # users see labels + drafts immediately on the latest inbox mails.
+        cutoff_epoch = None
         gmail_query = "in:inbox"
     else:
         cutoff_epoch = _mailbox_cutoff_epoch(mailbox)
@@ -4257,11 +4260,19 @@ async def onboarding_complete(payload: OnboardingCompletePayload):
     # Initial onboarding run: pak de laatste 10 inbox-mails ongeacht read-status
     # of cutoff. Geeft elke nieuwe gebruiker direct labels + drafts om te zien
     # i.p.v. een lege dashboard te zien tot er nieuwe mail binnenkomt.
-    process_result = await process_inbox_for_user(
-        email=payload.email,
-        max_results=AUTO_PROCESS_MAX_RESULTS,
-        initial_run=True,
-    )
+    #
+    # Bewust try/except: als de classificatie/draft-stap faalt (OpenAI flakey,
+    # Gmail API hiccup, etc.) mag de gebruiker nog steeds door naar success.html.
+    # De cron pakt 'm bij de volgende run alsnog op.
+    process_result: dict[str, Any] = {"count": 0, "messages": []}
+    try:
+        process_result = await process_inbox_for_user(
+            email=payload.email,
+            max_results=AUTO_PROCESS_MAX_RESULTS,
+            initial_run=True,
+        )
+    except Exception as exc:
+        print(f"[onboarding] Initial inbox processing failed: {repr(exc)}")
 
     first_draft_generated = existing_first_draft_generated or any(
         message.get("draft_created") is True
