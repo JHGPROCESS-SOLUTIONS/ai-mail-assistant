@@ -3326,7 +3326,11 @@ async def process_open_to_respond_threads(
     return results
 
 
-async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str, Any]:
+async def process_inbox_for_user(
+    email: str,
+    max_results: int = 10,
+    initial_run: bool = False,
+) -> dict[str, Any]:
     context = await get_gmail_context_by_email(email)
     user = context["user"]
     mailbox = context["mailbox"]
@@ -3353,14 +3357,19 @@ async def process_inbox_for_user(email: str, max_results: int = 10) -> dict[str,
 
     results: list[dict[str, Any]] = []
 
-    # Build the Gmail search query. We only want UNREAD inbox mail that
-    # arrived AFTER the mailbox was connected to OfficeFlow — old unread
-    # marketing / notification mail from before the connect must stay out
-    # of scope, otherwise the Marketing label keeps filling up with ancient
-    # promos each run.
-    cutoff_epoch = _mailbox_cutoff_epoch(mailbox)
-    base_query = "in:inbox is:unread"
-    gmail_query = f"{base_query} after:{cutoff_epoch}" if cutoff_epoch else base_query
+    # Build the Gmail search query.
+    # - Normal runs (cron): UNREAD inbox mail AFTER cutoff — ignores old
+    #   marketing/notifications already lying around when the user connected.
+    # - Initial run (onboarding): the latest N inbox mails regardless of
+    #   read-status / cutoff. Gives every new user an immediate "wow" moment
+    #   with labels and drafts on their actual recent inbox, instead of an
+    #   empty dashboard while they wait for new mail to arrive.
+    if initial_run:
+        gmail_query = "in:inbox"
+    else:
+        cutoff_epoch = _mailbox_cutoff_epoch(mailbox)
+        base_query = "in:inbox is:unread"
+        gmail_query = f"{base_query} after:{cutoff_epoch}" if cutoff_epoch else base_query
 
     gmail_data = await gmail_get_json_for_user(
         user_id=user["id"],
@@ -4245,9 +4254,13 @@ async def onboarding_complete(payload: OnboardingCompletePayload):
         mailbox_id=mailbox["id"],
     )
 
+    # Initial onboarding run: pak de laatste 10 inbox-mails ongeacht read-status
+    # of cutoff. Geeft elke nieuwe gebruiker direct labels + drafts om te zien
+    # i.p.v. een lege dashboard te zien tot er nieuwe mail binnenkomt.
     process_result = await process_inbox_for_user(
         email=payload.email,
         max_results=AUTO_PROCESS_MAX_RESULTS,
+        initial_run=True,
     )
 
     first_draft_generated = existing_first_draft_generated or any(
