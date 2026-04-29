@@ -2640,6 +2640,22 @@ async def supabase_get_attachment_summaries_for_emails(
     return data if isinstance(data, list) else []
 
 
+async def supabase_get_attachment_summaries_for_message(
+    user_id: str,
+    gmail_message_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch all (successful or failed) attachment summaries for a single
+    Gmail message. Used by generate_ai_reply to inject concrete facts
+    from PDFs/DOCX into the draft."""
+    data = await supabase_get(
+        "/rest/v1/attachment_summaries"
+        f"?user_id=eq.{quote(user_id, safe='')}"
+        f"&gmail_message_id=eq.{quote(gmail_message_id, safe='')}"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
 async def process_message_attachments(
     user_id: str,
     email_id: str | None,
@@ -3498,11 +3514,55 @@ VOORBEELDEN:
     }
 
 
+def _format_attachment_context(summaries: list[dict[str, Any]] | None) -> str:
+    """Build a prompt-ready block from attachment summaries. Returns empty
+    string if there's nothing useful to add (no summaries, all failed/unsupported)."""
+    if not summaries:
+        return ""
+    blocks: list[str] = []
+    for s in summaries:
+        if (s.get("status") or "") != "success":
+            continue
+        summary_text = (s.get("summary") or "").strip()
+        if not summary_text:
+            continue
+        filename = s.get("filename") or "Bijlage"
+        kd = s.get("key_data") or {}
+
+        lines = [f"{filename}:", f"- Samenvatting: {summary_text}"]
+        for label, key in [
+            ("Bedragen", "amounts"),
+            ("Datums", "dates"),
+            ("Deadlines", "deadlines"),
+            ("Partijen", "parties"),
+            ("Belangrijke clausules", "key_clauses"),
+        ]:
+            values = kd.get(key) or []
+            if isinstance(values, list) and values:
+                joined = "; ".join(str(v) for v in values if v)
+                if joined:
+                    lines.append(f"- {label}: {joined}")
+        blocks.append("\n".join(lines))
+
+    if not blocks:
+        return ""
+
+    return (
+        "Bijlage-context (door OfficeFlow geanalyseerd uit de bijgevoegde bestanden):\n\n"
+        + "\n\n".join(blocks)
+        + "\n\nGebruik deze concrete feiten in je reply waar relevant. "
+        "Verwijs naar specifieke bedragen, data en voorwaarden in plaats van een "
+        "generieke \"ik bekijk het en kom terug\" — tenzij de afzender niets vraagt "
+        "wat met deze feiten te maken heeft."
+    )
+
+
 async def generate_ai_reply(
     user_id: str,
     subject: str | None,
     sender: str | None,
     body_text: str | None,
+    attachment_summaries: list[dict[str, Any]] | None = None,
 ) -> str:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
@@ -3512,6 +3572,7 @@ async def generate_ai_reply(
     style_instructions = build_reply_style_instructions(settings)
     learned_style_instructions = build_style_profile_instructions(style_profile)
     language_instruction_block = build_language_instruction_block(settings, body_text)
+    attachment_context_block = _format_attachment_context(attachment_summaries)
 
     prompt = f"""
 Je bent de persoonlijke e-mailassistent van de gebruiker.
@@ -3526,8 +3587,8 @@ Harde regels:
 - schrijf NOOIT "Onderwerp:" of "Subject:"
 - gebruik GEEN placeholders zoals "[je naam]" of "[your name]"
 - noem NOOIT "OfficeFlow", tenzij dit expliciet nodig is vanuit de e-mail of gebruikersinstructies
-- verzin geen details, prijzen, data, deadlines of beloftes die niet in de mail of instructies staan
-- doe geen concrete toezeggingen over timing, planning, prijs of oplevering tenzij die expliciet bekend zijn
+- verzin geen details, prijzen, data, deadlines of beloftes die niet in de mail, instructies of bijlage-context staan
+- doe geen concrete toezeggingen over timing, planning, prijs of oplevering tenzij die expliciet bekend zijn (bijv. uit een bijlage)
 - voeg NOOIT extra informatie toe die niet expliciet gevraagd wordt
 - verwijs NOOIT naar websites, pagina's of externe informatie tenzij dat expliciet gevraagd wordt in de e-mail of expliciet is ingesteld door de gebruiker
 - schrijf natuurlijk, menselijk, geloofwaardig en direct
@@ -3573,10 +3634,13 @@ Gebruikersvoorkeuren:
 Geleerde schrijfstijl:
 {learned_style_instructions if learned_style_instructions else "Nog geen stijlprofiel beschikbaar."}
 
+{attachment_context_block if attachment_context_block else ""}
+
 Belangrijk:
 - expliciete gebruikersinstellingen gaan boven het geleerde stijlprofiel
 - output moet direct bruikbaar zijn als draft body
 - schrijf alleen de uiteindelijke tekst, zonder uitleg of toelichting
+- bij bijlage-context: gebruik concrete feiten (bedragen, datums) waar de afzender ernaar vraagt of daarmee samenhangt
 
 Van: {sender}
 Onderwerp: {subject}
@@ -4064,6 +4128,32 @@ async def process_inbox_for_user(
         except Exception as exc:
             print(f"[auto-archive-hook] thread {thread_id}: {repr(exc)}")
 
+        # ============ ATTACHMENT AI SUMMARIES ============
+        # Process attachments BEFORE draft generation so the AI reply can
+        # reference concrete facts (amounts, dates, deadlines) from PDF/DOCX.
+        # Best-effort: failure here must not block the rest of the flow.
+        # Only runs for To Respond / Priority / Follow Up labels (cost guard
+        # is inside process_message_attachments).
+        attachments_processed = 0
+        attachment_summaries_for_draft: list[dict[str, Any]] = []
+        try:
+            attachments_processed = await process_message_attachments(
+                user_id=user["id"],
+                email_id=email_row["id"] if email_row else None,
+                gmail_message_id=message_id,
+                message_data=message_data,
+                target_label=target_label,
+            )
+            if attachments_processed > 0:
+                attachment_summaries_for_draft = (
+                    await supabase_get_attachment_summaries_for_message(
+                        user_id=user["id"],
+                        gmail_message_id=message_id,
+                    )
+                )
+        except Exception as exc:
+            print(f"[attachment-ai] outer error for message {message_id}: {repr(exc)}")
+
         should_generate_draft = (
             LABEL_RULES[target_label]["generate_draft"]
             and not is_marketing_tab
@@ -4083,6 +4173,7 @@ async def process_inbox_for_user(
                     subject=subject,
                     sender=from_header,
                     body_text=body_text,
+                    attachment_summaries=attachment_summaries_for_draft or None,
                 )
 
                 to_email = extract_email_address(from_header)
@@ -4124,22 +4215,6 @@ async def process_inbox_for_user(
                 print(f"[draft-generation] Failed for message {message_id}: {repr(exc)}")
                 # Mail blijft gelabeld. Volgende auto-process run probeert opnieuw
                 # omdat existing_drafts nog steeds leeg is.
-
-        # ============ ATTACHMENT AI SUMMARIES ============
-        # Best-effort: any failure here must not block the rest of the flow.
-        # Only runs for To Respond / Priority / Follow Up classifications
-        # (cost guard built into process_message_attachments).
-        attachments_processed = 0
-        try:
-            attachments_processed = await process_message_attachments(
-                user_id=user["id"],
-                email_id=email_row["id"] if email_row else None,
-                gmail_message_id=message_id,
-                message_data=message_data,
-                target_label=target_label,
-            )
-        except Exception as exc:
-            print(f"[attachment-ai] outer error for message {message_id}: {repr(exc)}")
 
         results.append(
             {
