@@ -2393,6 +2393,368 @@ async def send_gmail_draft(user_id: str, gmail_draft_id: str) -> dict[str, Any]:
 
 
 # ----------------------------
+# Attachment AI helpers
+# ----------------------------
+
+# Limits — keep cost predictable and avoid hammering OpenAI on huge files.
+ATTACHMENT_MAX_SIZE_BYTES = int(os.getenv("ATTACHMENT_MAX_SIZE_BYTES", "5242880"))  # 5 MB
+ATTACHMENT_MAX_PER_MESSAGE = int(os.getenv("ATTACHMENT_MAX_PER_MESSAGE", "3"))
+ATTACHMENT_MAX_TEXT_CHARS = int(os.getenv("ATTACHMENT_MAX_TEXT_CHARS", "30000"))  # ~ first ~7-8 pages
+
+SUPPORTED_ATTACHMENT_MIME_TYPES = {
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
+    "application/msword",  # legacy .doc — pypdf/docx won't extract; will mark unsupported
+}
+
+# Only run attachment summarisation when the AI classified the mail into one
+# of these labels. Saves cost on Marketing / Notification / Ignore noise.
+ATTACHMENT_SUMMARY_LABELS = {"To Respond", "Priority", "Follow Up"}
+
+
+def _walk_message_parts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    """Flatten Gmail message payload into a list of all parts (recursive)."""
+    parts: list[dict[str, Any]] = []
+    if not payload:
+        return parts
+    parts.append(payload)
+    for child in (payload.get("parts") or []):
+        parts.extend(_walk_message_parts(child))
+    return parts
+
+
+def find_attachments_in_message(message_data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return a list of {filename, mime_type, size, attachment_id} for every
+    attached file in the Gmail message. Inline parts (no filename) are skipped."""
+    out: list[dict[str, Any]] = []
+    payload = message_data.get("payload") or {}
+    for part in _walk_message_parts(payload):
+        filename = (part.get("filename") or "").strip()
+        body = part.get("body") or {}
+        attachment_id = body.get("attachmentId")
+        if not filename or not attachment_id:
+            continue
+        out.append({
+            "filename": filename,
+            "mime_type": part.get("mimeType") or "",
+            "size_bytes": int(body.get("size") or 0),
+            "attachment_id": attachment_id,
+        })
+    return out
+
+
+async def download_gmail_attachment_bytes(
+    user_id: str,
+    gmail_message_id: str,
+    attachment_id: str,
+) -> bytes:
+    """Fetch the raw bytes of a Gmail attachment via the API."""
+    data = await gmail_get_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/messages/{gmail_message_id}/attachments/{attachment_id}",
+    )
+    raw_b64 = (data or {}).get("data") or ""
+    # Gmail uses URL-safe base64 with no padding; pad to multiple of 4.
+    padding = "=" * (-len(raw_b64) % 4)
+    return base64.urlsafe_b64decode(raw_b64 + padding)
+
+
+def extract_text_from_pdf_bytes(blob: bytes) -> str:
+    """Extract text content from a PDF. Returns empty string if extraction fails."""
+    try:
+        from pypdf import PdfReader  # local import to keep startup fast
+        from io import BytesIO
+        reader = PdfReader(BytesIO(blob))
+        chunks: list[str] = []
+        for page in reader.pages:
+            try:
+                chunks.append(page.extract_text() or "")
+            except Exception:
+                continue
+        return "\n\n".join(c for c in chunks if c).strip()
+    except Exception as exc:
+        print(f"[attachment-pdf] extract failed: {repr(exc)}")
+        return ""
+
+
+def extract_text_from_docx_bytes(blob: bytes) -> str:
+    """Extract text content from a .docx file. Returns empty string on failure."""
+    try:
+        from docx import Document  # python-docx
+        from io import BytesIO
+        doc = Document(BytesIO(blob))
+        paragraphs = [p.text for p in doc.paragraphs if (p.text or "").strip()]
+        # Tables — flatten into pipe-separated rows so the LLM can read them.
+        for table in doc.tables:
+            for row in table.rows:
+                cells = [(c.text or "").strip() for c in row.cells]
+                if any(cells):
+                    paragraphs.append(" | ".join(cells))
+        return "\n".join(paragraphs).strip()
+    except Exception as exc:
+        print(f"[attachment-docx] extract failed: {repr(exc)}")
+        return ""
+
+
+def extract_text_from_attachment(filename: str, mime_type: str, blob: bytes) -> tuple[str, str]:
+    """Returns (extracted_text, status). Status is 'success' or 'unsupported'."""
+    name_lower = (filename or "").lower()
+    mt = (mime_type or "").lower()
+    if mt == "application/pdf" or name_lower.endswith(".pdf"):
+        text = extract_text_from_pdf_bytes(blob)
+        return text, ("success" if text else "failed")
+    if (
+        mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        or name_lower.endswith(".docx")
+    ):
+        text = extract_text_from_docx_bytes(blob)
+        return text, ("success" if text else "failed")
+    return "", "unsupported"
+
+
+async def summarize_attachment_text(filename: str, text: str) -> dict[str, Any]:
+    """Send extracted text to OpenAI and ask for a summary + structured data.
+    Returns {summary: str, key_data: dict} — never raises; falls back to
+    {summary: '', key_data: {}} on error."""
+    if not text:
+        return {"summary": "", "key_data": {}}
+
+    api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    # Truncate aggressively — cost control. The first N chars of a business
+    # document almost always contain the substance (date, amount, parties).
+    snippet = text[:ATTACHMENT_MAX_TEXT_CHARS]
+
+    prompt = f"""Je bent een zakelijke assistent. Je krijgt de tekst van een bijlage uit een e-mail. Geef een zo concreet mogelijke samenvatting plus de belangrijkste feiten in een gestructureerd formaat.
+
+Bestandsnaam: {filename}
+
+Inhoud:
+\"\"\"
+{snippet}
+\"\"\"
+
+Antwoord ALLEEN met JSON in dit formaat:
+{{
+  "summary": "2-3 zinnen die de essentie pakken in zakelijk Nederlands",
+  "key_data": {{
+    "amounts": ["bedragen incl. valuta + waarvoor, bijv. '€18.500 ex BTW — totaal offerte'"],
+    "dates": ["belangrijke datums + waarvoor"],
+    "deadlines": ["uiterste data + waarvoor"],
+    "parties": ["genoemde organisaties/personen"],
+    "key_clauses": ["belangrijke voorwaarden of bepalingen die de lezer moet weten"]
+  }}
+}}
+
+Regels:
+- Lege array als veld niet van toepassing is — niet verzinnen.
+- Hou het concreet en kort.
+- Geen interpretatie, alleen wat in de tekst staat.
+- Geen markdown, geen uitleg, alleen valide JSON."""
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.1,
+                    "response_format": {"type": "json_object"},
+                },
+            )
+        if response.status_code != 200:
+            print(f"[attachment-ai] OpenAI {response.status_code}: {response.text[:200]}")
+            return {"summary": "", "key_data": {}}
+        data = response.json()
+        content = data["choices"][0]["message"]["content"] or "{}"
+        parsed = json.loads(content)
+        return {
+            "summary": (parsed.get("summary") or "").strip(),
+            "key_data": parsed.get("key_data") or {},
+        }
+    except Exception as exc:
+        print(f"[attachment-ai] summarize failed: {repr(exc)}")
+        return {"summary": "", "key_data": {}}
+
+
+async def supabase_insert_attachment_summary(
+    user_id: str,
+    email_id: str | None,
+    gmail_message_id: str,
+    gmail_attachment_id: str | None,
+    filename: str,
+    mime_type: str | None,
+    size_bytes: int | None,
+    summary: str,
+    key_data: dict[str, Any] | None,
+    status: str,
+    error_message: str | None = None,
+) -> dict[str, Any] | None:
+    payload = {
+        "user_id": user_id,
+        "email_id": email_id,
+        "gmail_message_id": gmail_message_id,
+        "gmail_attachment_id": gmail_attachment_id,
+        "filename": filename,
+        "mime_type": mime_type,
+        "size_bytes": size_bytes,
+        "summary": summary or None,
+        "key_data": key_data or None,
+        "status": status,
+        "error_message": error_message,
+    }
+    try:
+        data = await supabase_post(
+            "/rest/v1/attachment_summaries"
+            "?on_conflict=gmail_message_id,gmail_attachment_id",
+            [payload],
+            prefer="resolution=merge-duplicates,return=representation",
+        )
+        if isinstance(data, list) and data:
+            return data[0]
+    except Exception as exc:
+        print(f"[attachment-summary-db] insert failed for {filename}: {repr(exc)}")
+    return None
+
+
+async def supabase_get_attachment_summaries_for_emails(
+    user_id: str,
+    email_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not email_ids:
+        return []
+    in_clause = ",".join(quote(eid, safe="") for eid in email_ids if eid)
+    if not in_clause:
+        return []
+    data = await supabase_get(
+        "/rest/v1/attachment_summaries"
+        f"?user_id=eq.{quote(user_id, safe='')}"
+        f"&email_id=in.({in_clause})"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
+async def process_message_attachments(
+    user_id: str,
+    email_id: str | None,
+    gmail_message_id: str,
+    message_data: dict[str, Any],
+    target_label: str,
+) -> int:
+    """Find, extract, summarize and persist attachments for a single message.
+    Returns the number of attachments actually processed (success or fail)."""
+    if target_label not in ATTACHMENT_SUMMARY_LABELS:
+        return 0
+
+    attachments = find_attachments_in_message(message_data)
+    if not attachments:
+        return 0
+
+    # Cap to N attachments per message — anything beyond is unusual and costly.
+    attachments = attachments[:ATTACHMENT_MAX_PER_MESSAGE]
+    processed = 0
+
+    for att in attachments:
+        filename = att["filename"]
+        mime_type = att["mime_type"]
+        size_bytes = att["size_bytes"]
+        attachment_id = att["attachment_id"]
+
+        # Size guard
+        if size_bytes and size_bytes > ATTACHMENT_MAX_SIZE_BYTES:
+            await supabase_insert_attachment_summary(
+                user_id=user_id,
+                email_id=email_id,
+                gmail_message_id=gmail_message_id,
+                gmail_attachment_id=attachment_id,
+                filename=filename,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                summary="",
+                key_data=None,
+                status="too_large",
+                error_message=f"File exceeds {ATTACHMENT_MAX_SIZE_BYTES} bytes",
+            )
+            processed += 1
+            continue
+
+        # Type guard — only spend OpenAI cost on supported types
+        mt = (mime_type or "").lower()
+        name_lower = filename.lower()
+        is_supported = (
+            mt in SUPPORTED_ATTACHMENT_MIME_TYPES
+            or name_lower.endswith((".pdf", ".docx"))
+        )
+        if not is_supported:
+            await supabase_insert_attachment_summary(
+                user_id=user_id,
+                email_id=email_id,
+                gmail_message_id=gmail_message_id,
+                gmail_attachment_id=attachment_id,
+                filename=filename,
+                mime_type=mime_type,
+                size_bytes=size_bytes,
+                summary="",
+                key_data=None,
+                status="unsupported",
+            )
+            processed += 1
+            continue
+
+        # Download + extract + summarize. Each step has its own try/except
+        # so a single bad attachment never poisons the rest of the message.
+        try:
+            blob = await download_gmail_attachment_bytes(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                attachment_id=attachment_id,
+            )
+        except Exception as exc:
+            await supabase_insert_attachment_summary(
+                user_id=user_id, email_id=email_id,
+                gmail_message_id=gmail_message_id, gmail_attachment_id=attachment_id,
+                filename=filename, mime_type=mime_type, size_bytes=size_bytes,
+                summary="", key_data=None, status="failed",
+                error_message=f"download failed: {repr(exc)[:240]}",
+            )
+            processed += 1
+            continue
+
+        text, extract_status = extract_text_from_attachment(filename, mime_type, blob)
+        if extract_status != "success" or not text:
+            await supabase_insert_attachment_summary(
+                user_id=user_id, email_id=email_id,
+                gmail_message_id=gmail_message_id, gmail_attachment_id=attachment_id,
+                filename=filename, mime_type=mime_type, size_bytes=size_bytes,
+                summary="", key_data=None,
+                status=("unsupported" if extract_status == "unsupported" else "failed"),
+                error_message=("text extraction returned empty" if extract_status == "success" else None),
+            )
+            processed += 1
+            continue
+
+        summary_obj = await summarize_attachment_text(filename, text)
+        await supabase_insert_attachment_summary(
+            user_id=user_id, email_id=email_id,
+            gmail_message_id=gmail_message_id, gmail_attachment_id=attachment_id,
+            filename=filename, mime_type=mime_type, size_bytes=size_bytes,
+            summary=summary_obj.get("summary") or "",
+            key_data=summary_obj.get("key_data") or {},
+            status=("success" if summary_obj.get("summary") else "failed"),
+            error_message=(None if summary_obj.get("summary") else "OpenAI returned empty summary"),
+        )
+        processed += 1
+
+    return processed
+
+
+# ----------------------------
 # Thread state helpers
 # ----------------------------
 
@@ -3748,6 +4110,22 @@ async def process_inbox_for_user(
                 # Mail blijft gelabeld. Volgende auto-process run probeert opnieuw
                 # omdat existing_drafts nog steeds leeg is.
 
+        # ============ ATTACHMENT AI SUMMARIES ============
+        # Best-effort: any failure here must not block the rest of the flow.
+        # Only runs for To Respond / Priority / Follow Up classifications
+        # (cost guard built into process_message_attachments).
+        attachments_processed = 0
+        try:
+            attachments_processed = await process_message_attachments(
+                user_id=user["id"],
+                email_id=email_row["id"] if email_row else None,
+                gmail_message_id=message_id,
+                message_data=message_data,
+                target_label=target_label,
+            )
+        except Exception as exc:
+            print(f"[attachment-ai] outer error for message {message_id}: {repr(exc)}")
+
         results.append(
             {
                 "gmail_message_id": message_data.get("id"),
@@ -3768,6 +4146,7 @@ async def process_inbox_for_user(
                 "already_had_label": has_any_custom_label,
                 "thread_status": thread_status,
                 "has_open_draft": has_open_draft,
+                "attachments_processed": attachments_processed,
             }
         )
 
@@ -4465,6 +4844,25 @@ async def api_cancel_scheduled_send(
         status="cancelled",
     )
     return {"status": "ok", "scheduled_send": updated}
+
+
+# ============ ATTACHMENT SUMMARIES ============
+@app.get("/api/attachment-summaries")
+async def api_attachment_summaries(
+    email_ids: str = "",
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return AI summaries for attachments on the given draft email_ids.
+    Frontend passes a comma-separated list (max 50). Empty list returns []."""
+    if not email_ids:
+        return {"status": "ok", "items": []}
+    raw = [eid.strip() for eid in email_ids.split(",") if eid.strip()]
+    raw = raw[:50]
+    rows = await supabase_get_attachment_summaries_for_emails(
+        user_id=user["id"],
+        email_ids=raw,
+    )
+    return {"status": "ok", "items": rows}
 
 
 @app.patch("/api/preferences/me")
@@ -7877,6 +8275,7 @@ async def api_recent_drafts(
         )
         items.append({
             "id": draft.get("id"),
+            "email_id": draft.get("email_id"),
             "subject": draft.get("subject") or email_row.get("subject") or "(geen onderwerp)",
             "confidence": draft.get("confidence"),
             "status": draft.get("status"),
