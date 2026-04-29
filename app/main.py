@@ -7857,13 +7857,20 @@ async def api_recent_drafts(
         except Exception as exc:
             print(f"[recent-drafts] emails fetch failed: {repr(exc)}")
 
+    # Use the user's mailbox email in the Gmail URL so the link opens the
+    # right account even when the browser has multiple Google sessions.
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user_id, provider="gmail")
+    mailbox_email = (mailbox or {}).get("email_address") or ""
+    gmail_user_segment = quote(mailbox_email, safe="@") if mailbox_email else "0"
+
     items: list[dict[str, Any]] = []
     for draft in drafts_rows:
         email_row = emails_by_id.get(draft.get("email_id") or "") or {}
         thread_id = email_row.get("gmail_thread_id")
-        # Gmail web URL to open the thread in the user's browser.
+        # Gmail web URL to open the thread in the user's browser, scoped to
+        # the connected mailbox (avoids landing in the wrong Google account).
         gmail_thread_url = (
-            f"https://mail.google.com/mail/u/0/#all/{thread_id}"
+            f"https://mail.google.com/mail/u/{gmail_user_segment}/#all/{thread_id}"
             if thread_id else None
         )
         items.append({
