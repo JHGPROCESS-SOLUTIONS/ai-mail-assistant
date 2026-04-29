@@ -2935,6 +2935,46 @@ async def setup_gmail_labels_for_mailbox(user_id: str, mailbox_id: str) -> list[
 # AI
 # ----------------------------
 
+# Unsubscribe / opt-out detection.
+# A mail asking to be removed from a list MUST be classified as To Respond,
+# never Ignore/Marketing/Notification — for GDPR opt-out compliance. We
+# enforce this at two levels: (1) explicit rule in the classifier prompt,
+# (2) post-classification override if the AI gets it wrong. The override
+# is the safety net.
+_UNSUBSCRIBE_PATTERNS = re.compile(
+    r"\b("
+    r"unsubscribe|uitschrijven|uitschrijving|afmelden|afmelding|"
+    r"opt[\s\-]?out|opted[\s\-]?out|"
+    r"verwijder\s+mij|verwijder\s+me|remove\s+me|please\s+remove|"
+    r"haal\s+mij\s+(uit|van)|haal\s+me\s+(uit|van)|"
+    r"graag\s+afmelden|graag\s+uitschrijven|wil\s+(mij|me)\s+afmelden"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def detect_unsubscribe_request(subject: str | None, body_text: str | None) -> bool:
+    """True when the mail clearly is a request to be unsubscribed from a
+    mailing list. Scoped to subject hits OR short bodies so we don't flag
+    newsletter footers that also contain the word 'unsubscribe'."""
+    subject_lower = (subject or "").lower()
+    body_text_str = body_text or ""
+    body_lower = body_text_str.lower()
+
+    # Strongest signal: subject says it directly
+    if _UNSUBSCRIBE_PATTERNS.search(subject_lower):
+        return True
+
+    # Medium signal: short body where unsubscribe is the main intent.
+    # 800 chars covers polite Dutch unsubscribe requests including a
+    # short polite signature, but excludes newsletter footers (those are
+    # always inside long marketing bodies).
+    if len(body_text_str) <= 800 and _UNSUBSCRIBE_PATTERNS.search(body_lower):
+        return True
+
+    return False
+
+
 async def classify_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
 
@@ -2972,6 +3012,11 @@ Regels:
 Belangrijk:
 - Bij twijfel tussen Priority en To Respond -> kies To Respond.
 - Bij twijfel tussen Marketing en Ignore -> kies Marketing (veiliger voor gebruiker).
+
+KRITISCHE REGEL — Uitschrijf / afmelding / opt-out requests:
+- Als de mail expliciet vraagt om afmelding, uitschrijving, opt-out, "remove me", "unsubscribe", "verwijder mij", "haal me uit jullie lijst" of vergelijkbaar -> ALTIJD label "To Respond".
+- Dit overschrijft alle andere signalen. NOOIT Ignore, Marketing, Notification of FYI voor expliciete uitschrijf-verzoeken.
+- Reden: AVG/GDPR opt-out compliance — afzender moet binnen redelijke termijn uit alle mailing lists verwijderd worden.
 
 Geef ook een confidence score terug (hoe zeker ben je van de classificatie):
 - "high": signalen in de mail zijn eenduidig; geen significante twijfel tussen labels.
@@ -3059,6 +3104,29 @@ E-mail:
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
+    # ============ COMPLIANCE OVERRIDE — UNSUBSCRIBE / OPT-OUT ============
+    # Safety net: if a clear unsubscribe request slipped past the classifier
+    # (or it labelled it Ignore/Marketing/Notification/FYI), force To Respond.
+    # GDPR/AVG opt-out compliance trumps the AI's judgement — we never want
+    # an unsubscribe request to silently end up in Ignore.
+    if label in ("Ignore", "Marketing", "Notification", "FYI"):
+        if detect_unsubscribe_request(subject, body_text):
+            print(
+                f"[classify_email] Compliance override: '{label}' -> 'To Respond' "
+                f"because mail looks like an unsubscribe / opt-out request "
+                f"(subject={subject!r})"
+            )
+            return {
+                "label": "To Respond",
+                "reason": (
+                    f"Compliance override: detected unsubscribe / opt-out "
+                    f"request (GDPR — must be processed by user). "
+                    f"Classifier originally said '{label}'."
+                ),
+                "confidence": "high",
+                "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+            }
+
     return {
         "label": label,
         "reason": reason,
@@ -3113,6 +3181,11 @@ Belangrijke voorkeur:
 - Kies alleen To Respond als de gebruiker nu echt weer iets moet doen.
 - Kies Waiting On Reply alleen als het gesprek nog open voelt maar niet echt klaar is.
 - Bij twijfel tussen To Respond en een andere label -> kies To Respond.
+
+KRITISCHE REGEL — Uitschrijf / afmelding / opt-out requests:
+- Als de afzender expliciet vraagt om afmelding, uitschrijving, opt-out, "remove me", "unsubscribe", "verwijder mij", "haal me uit jullie lijst" of vergelijkbaar -> ALTIJD label "To Respond".
+- Dit overschrijft alle andere signalen. NOOIT Ignore, Notification, FYI of Done voor expliciete uitschrijf-verzoeken.
+- Reden: AVG/GDPR opt-out compliance — afzender moet binnen redelijke termijn uit alle mailing lists verwijderd worden.
 
 Geef ook een confidence score terug (hoe zeker ben je van de classificatie):
 - "high": signalen in de mail zijn eenduidig; geen significante twijfel tussen labels.
@@ -3199,6 +3272,27 @@ E-mail:
             "confidence": "low",
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
+
+    # ============ COMPLIANCE OVERRIDE — UNSUBSCRIBE / OPT-OUT ============
+    # Same safety net as classify_email: a mid-thread unsubscribe request
+    # must always surface as To Respond, never get buried in Done/Ignore/etc.
+    if label in ("Done", "Ignore", "Notification", "FYI", "Waiting On Reply"):
+        if detect_unsubscribe_request(subject, body_text):
+            print(
+                f"[classify_follow_up_email] Compliance override: '{label}' -> 'To Respond' "
+                f"because mail looks like an unsubscribe / opt-out request "
+                f"(subject={subject!r})"
+            )
+            return {
+                "label": "To Respond",
+                "reason": (
+                    f"Compliance override: detected unsubscribe / opt-out "
+                    f"request (GDPR — must be processed by user). "
+                    f"Classifier originally said '{label}'."
+                ),
+                "confidence": "high",
+                "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
+            }
 
     return {
         "label": label,
