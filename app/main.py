@@ -2649,11 +2649,20 @@ async def process_message_attachments(
 ) -> int:
     """Find, extract, summarize and persist attachments for a single message.
     Returns the number of attachments actually processed (success or fail)."""
+    print(f"[attachment-ai] called for msg {gmail_message_id} label={target_label!r}")
+
     if target_label not in ATTACHMENT_SUMMARY_LABELS:
+        print(f"[attachment-ai] skip msg {gmail_message_id}: label {target_label!r} not in supported set")
         return 0
 
     attachments = find_attachments_in_message(message_data)
+    print(f"[attachment-ai] msg {gmail_message_id}: found {len(attachments)} attachment(s)")
     if not attachments:
+        # Diagnostic: show the top-level mime type so we know if Gmail gave us
+        # the right payload structure.
+        top_mime = (message_data.get("payload") or {}).get("mimeType")
+        has_parts = bool((message_data.get("payload") or {}).get("parts"))
+        print(f"[attachment-ai] msg {gmail_message_id}: top mime={top_mime!r} has_parts={has_parts}")
         return 0
 
     # Cap to N attachments per message — anything beyond is unusual and costly.
@@ -2740,17 +2749,23 @@ async def process_message_attachments(
             continue
 
         summary_obj = await summarize_attachment_text(filename, text)
+        final_status = "success" if summary_obj.get("summary") else "failed"
+        print(
+            f"[attachment-ai] msg {gmail_message_id} file={filename!r} "
+            f"text_len={len(text)} status={final_status}"
+        )
         await supabase_insert_attachment_summary(
             user_id=user_id, email_id=email_id,
             gmail_message_id=gmail_message_id, gmail_attachment_id=attachment_id,
             filename=filename, mime_type=mime_type, size_bytes=size_bytes,
             summary=summary_obj.get("summary") or "",
             key_data=summary_obj.get("key_data") or {},
-            status=("success" if summary_obj.get("summary") else "failed"),
+            status=final_status,
             error_message=(None if summary_obj.get("summary") else "OpenAI returned empty summary"),
         )
         processed += 1
 
+    print(f"[attachment-ai] msg {gmail_message_id}: processed {processed} attachment(s)")
     return processed
 
 
