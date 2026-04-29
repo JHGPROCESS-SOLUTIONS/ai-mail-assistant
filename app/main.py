@@ -1174,6 +1174,102 @@ async def supabase_update_mailbox_status(mailbox_id: str, status: str) -> dict[s
     return data[0] if isinstance(data, list) and data else data
 
 
+# ============ SCHEDULED SENDS ============
+async def supabase_insert_scheduled_send(
+    user_id: str,
+    mailbox_id: str,
+    gmail_draft_id: str,
+    gmail_thread_id: str | None,
+    subject: str | None,
+    to_email: str | None,
+    scheduled_at_iso: str,
+) -> dict[str, Any]:
+    data = await supabase_post(
+        "/rest/v1/scheduled_sends",
+        [{
+            "user_id": user_id,
+            "mailbox_id": mailbox_id,
+            "gmail_draft_id": gmail_draft_id,
+            "gmail_thread_id": gmail_thread_id,
+            "subject": subject,
+            "to_email": to_email,
+            "scheduled_at": scheduled_at_iso,
+            "status": "pending",
+        }],
+        prefer="return=representation",
+    )
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=500, detail="Failed to create scheduled send")
+    return data[0]
+
+
+async def supabase_get_user_scheduled_sends(
+    user_id: str,
+    statuses: list[str] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    status_filter = ""
+    if statuses:
+        joined = ",".join(quote(s, safe="") for s in statuses)
+        status_filter = f"&status=in.({joined})"
+    data = await supabase_get(
+        f"/rest/v1/scheduled_sends"
+        f"?user_id=eq.{quote(user_id, safe='')}"
+        f"{status_filter}"
+        f"&order=scheduled_at.asc"
+        f"&limit={limit}"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
+async def supabase_get_due_scheduled_sends(limit: int = 50) -> list[dict[str, Any]]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    data = await supabase_get(
+        f"/rest/v1/scheduled_sends"
+        f"?status=eq.pending"
+        f"&scheduled_at=lte.{quote(now_iso, safe='')}"
+        f"&order=scheduled_at.asc"
+        f"&limit={limit}"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
+async def supabase_update_scheduled_send(
+    scheduled_send_id: str,
+    status: str,
+    sent_at: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any] | None:
+    payload: dict[str, Any] = {"status": status}
+    if sent_at is not None:
+        payload["sent_at"] = sent_at
+    if error_message is not None:
+        payload["error_message"] = error_message
+    data = await supabase_patch(
+        f"/rest/v1/scheduled_sends?id=eq.{quote(scheduled_send_id, safe='')}",
+        payload,
+    )
+    return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_get_scheduled_send_by_id(
+    scheduled_send_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Look up a single row scoped to the requesting user (security)."""
+    data = await supabase_get(
+        f"/rest/v1/scheduled_sends"
+        f"?id=eq.{quote(scheduled_send_id, safe='')}"
+        f"&user_id=eq.{quote(user_id, safe='')}"
+        f"&select=*"
+    )
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
 def _mailbox_cutoff_epoch(mailbox: dict[str, Any] | None) -> int | None:
     """Return the mailbox's inbox_cutoff_at as Unix epoch seconds.
 
@@ -2282,6 +2378,17 @@ async def create_gmail_threaded_draft(
         user_id=user_id,
         url=f"{GMAIL_API_BASE}/drafts",
         payload=payload,
+    )
+
+
+async def send_gmail_draft(user_id: str, gmail_draft_id: str) -> dict[str, Any]:
+    """Send an existing Gmail draft. Whatever content is currently in the
+    draft (including any user edits in Gmail) is what gets sent. The draft
+    is consumed and removed from the drafts folder afterwards."""
+    return await gmail_post_json_for_user(
+        user_id=user_id,
+        url=f"{GMAIL_API_BASE}/drafts/send",
+        payload={"id": gmail_draft_id},
     )
 
 
@@ -3721,10 +3828,69 @@ async def auto_process_loop():
         await asyncio.sleep(AUTO_PROCESS_INTERVAL_SECONDS)
 
 
+SCHEDULED_SEND_INTERVAL_SECONDS = int(os.getenv("SCHEDULED_SEND_INTERVAL_SECONDS", "30"))
+
+
+async def scheduled_send_loop():
+    """Background dispatcher for user-scheduled Gmail sends. Runs every
+    SCHEDULED_SEND_INTERVAL_SECONDS, picks up rows where status='pending'
+    AND scheduled_at <= now(), and sends each via Gmail's drafts/send API.
+
+    Failure modes (all marked 'failed' with error_message — never retried):
+      - draft was deleted in Gmail before scheduled time
+      - mailbox token revoked (status moves to needs_reconnect upstream)
+      - any other Gmail API error
+    """
+    await asyncio.sleep(12)
+
+    while True:
+        try:
+            due_rows = await supabase_get_due_scheduled_sends(limit=50)
+            if due_rows:
+                print(f"[scheduled-send] Dispatching {len(due_rows)} due send(s)")
+
+            for row in due_rows:
+                row_id = row.get("id")
+                user_id = row.get("user_id")
+                gmail_draft_id = row.get("gmail_draft_id")
+                if not (row_id and user_id and gmail_draft_id):
+                    continue
+
+                try:
+                    await send_gmail_draft(
+                        user_id=user_id,
+                        gmail_draft_id=gmail_draft_id,
+                    )
+                    await supabase_update_scheduled_send(
+                        scheduled_send_id=row_id,
+                        status="sent",
+                        sent_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    print(f"[scheduled-send] Sent draft {gmail_draft_id} for user {user_id}")
+                except Exception as exc:
+                    err = repr(exc)[:480]
+                    try:
+                        await supabase_update_scheduled_send(
+                            scheduled_send_id=row_id,
+                            status="failed",
+                            error_message=err,
+                        )
+                    except Exception:
+                        pass
+                    print(f"[scheduled-send] FAILED draft {gmail_draft_id} (user {user_id}): {err}")
+
+        except Exception as exc:
+            print(f"[scheduled-send] loop error: {repr(exc)}")
+
+        await asyncio.sleep(SCHEDULED_SEND_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def start_background_tasks():
     print("Multi-tenant auto processor started")
     asyncio.create_task(auto_process_loop())
+    print("Scheduled-send dispatcher started")
+    asyncio.create_task(scheduled_send_loop())
 
 
 # ----------------------------
@@ -4213,6 +4379,92 @@ async def api_get_mailbox_status(
         "mailbox_status": mailbox.get("status") or "unknown",
         "email": mailbox.get("email_address"),
     }
+
+
+# ============ SCHEDULED SENDS ============
+class ScheduledSendCreate(BaseModel):
+    gmail_draft_id: str
+    scheduled_at: str  # ISO 8601 timestamp with timezone
+    gmail_thread_id: str | None = None
+    subject: str | None = None
+    to_email: str | None = None
+
+
+@app.post("/api/scheduled-sends")
+async def api_create_scheduled_send(
+    body: ScheduledSendCreate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Schedule an existing Gmail draft to be sent at a future time."""
+    # Validate scheduled_at is parseable and in the future (with 30s grace).
+    try:
+        when = datetime.fromisoformat(body.scheduled_at.replace("Z", "+00:00"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid scheduled_at — expected ISO 8601")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if when < now - timedelta(seconds=30):
+        raise HTTPException(status_code=400, detail="scheduled_at must be in the future")
+
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user["id"], provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=400, detail="No connected Gmail mailbox")
+    if mailbox.get("status") != "connected":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mailbox not connected (status={mailbox.get('status')})",
+        )
+
+    row = await supabase_insert_scheduled_send(
+        user_id=user["id"],
+        mailbox_id=mailbox["id"],
+        gmail_draft_id=body.gmail_draft_id,
+        gmail_thread_id=body.gmail_thread_id,
+        subject=body.subject,
+        to_email=body.to_email,
+        scheduled_at_iso=when.isoformat(),
+    )
+    return {"status": "ok", "scheduled_send": row}
+
+
+@app.get("/api/scheduled-sends")
+async def api_list_scheduled_sends(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """List the user's scheduled sends. By default returns pending + recently
+    sent/failed/cancelled rows so the dashboard can show full history."""
+    rows = await supabase_get_user_scheduled_sends(
+        user_id=user["id"],
+        statuses=["pending", "sent", "failed", "cancelled"],
+        limit=100,
+    )
+    return {"status": "ok", "items": rows}
+
+
+@app.delete("/api/scheduled-sends/{scheduled_send_id}")
+async def api_cancel_scheduled_send(
+    scheduled_send_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Cancel a pending scheduled send. No-op for already-sent rows."""
+    row = await supabase_get_scheduled_send_by_id(
+        scheduled_send_id=scheduled_send_id,
+        user_id=user["id"],
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Scheduled send not found")
+    if row.get("status") != "pending":
+        return {
+            "status": "ok",
+            "scheduled_send": row,
+            "note": f"Cannot cancel — already {row.get('status')}",
+        }
+    updated = await supabase_update_scheduled_send(
+        scheduled_send_id=scheduled_send_id,
+        status="cancelled",
+    )
+    return {"status": "ok", "scheduled_send": updated}
 
 
 @app.patch("/api/preferences/me")
