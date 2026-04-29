@@ -79,6 +79,7 @@ STRIPE_BILLING_PORTAL_RETURN_URL = os.getenv(
 AUTO_PROCESS_ENABLED = os.getenv("AUTO_PROCESS_ENABLED", "true").lower() == "true"
 AUTO_PROCESS_INTERVAL_SECONDS = int(os.getenv("AUTO_PROCESS_INTERVAL_SECONDS", "60"))
 AUTO_PROCESS_MAX_RESULTS = int(os.getenv("AUTO_PROCESS_MAX_RESULTS", "10"))
+AUTO_PROCESS_MAX_CONCURRENCY = int(os.getenv("AUTO_PROCESS_MAX_CONCURRENCY", "10"))
 
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -3660,6 +3661,22 @@ async def process_inbox_for_user(
 async def auto_process_loop():
     await asyncio.sleep(8)
 
+    sem = asyncio.Semaphore(AUTO_PROCESS_MAX_CONCURRENCY)
+
+    async def _process_one(mailbox: dict[str, Any]) -> None:
+        email = mailbox.get("email_address")
+        if not email:
+            return
+        async with sem:
+            try:
+                await process_inbox_for_user(
+                    email=email,
+                    max_results=AUTO_PROCESS_MAX_RESULTS,
+                )
+                print(f"Processed mailbox: {email}")
+            except Exception as exc:
+                print(f"Failed mailbox {email}: {repr(exc)}")
+
     while True:
         try:
             if not AUTO_PROCESS_ENABLED:
@@ -3667,21 +3684,13 @@ async def auto_process_loop():
                 continue
 
             mailboxes = await get_all_active_mailboxes()
-            print(f"Auto processing {len(mailboxes)} connected mailbox(es)...")
+            print(
+                f"Auto processing {len(mailboxes)} connected mailbox(es) "
+                f"(concurrent, max {AUTO_PROCESS_MAX_CONCURRENCY} in flight)..."
+            )
 
-            for mailbox in mailboxes:
-                email = mailbox.get("email_address")
-                if not email:
-                    continue
-
-                try:
-                    await process_inbox_for_user(
-                        email=email,
-                        max_results=AUTO_PROCESS_MAX_RESULTS,
-                    )
-                    print(f"Processed mailbox: {email}")
-                except Exception as exc:
-                    print(f"Failed mailbox {email}: {repr(exc)}")
+            if mailboxes:
+                await asyncio.gather(*(_process_one(mb) for mb in mailboxes))
 
         except Exception as exc:
             print(f"Auto processor loop error: {repr(exc)}")
