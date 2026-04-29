@@ -1691,6 +1691,29 @@ async def refresh_google_access_token(user_id: str, refresh_token: str) -> str:
     new_access_token = data.get("access_token") if isinstance(data, dict) else None
 
     if not new_access_token:
+        # invalid_grant = refresh token is permanently revoked/expired (user
+        # disconnected the app, scope changed, 6mo inactivity, etc). Mark the
+        # mailbox as needs_reconnect so the polling loop skips it and the
+        # dashboard can surface a "reconnect Gmail" CTA. Re-OAuth will flip
+        # the status back to 'connected' automatically.
+        error_code = data.get("error") if isinstance(data, dict) else None
+        if error_code == "invalid_grant":
+            try:
+                mailbox = await supabase_get_mailbox_by_user_id(
+                    user_id=user_id,
+                    provider="gmail",
+                )
+                if mailbox and mailbox.get("status") != "needs_reconnect":
+                    await supabase_update_mailbox_status(
+                        mailbox_id=mailbox["id"],
+                        status="needs_reconnect",
+                    )
+                    print(
+                        f"[oauth-revoked] Marked mailbox {mailbox.get('email_address')} "
+                        f"(user {user_id}) as needs_reconnect — refresh token invalid"
+                    )
+            except Exception as exc:
+                print(f"[oauth-revoked] Failed to mark mailbox for user {user_id}: {repr(exc)}")
         raise HTTPException(status_code=401, detail=f"Google token refresh failed: {data}")
 
     await supabase_update_oauth_account_tokens(
@@ -4170,6 +4193,26 @@ async def api_get_my_preferences(
     """Return current user_settings for the logged-in user."""
     settings = await supabase_get_user_settings(user["id"])
     return {"status": "ok", "settings": settings or {}}
+
+
+@app.get("/api/mailbox/status")
+async def api_get_mailbox_status(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return mailbox connection status for the logged-in user. Used by the
+    dashboard to show a "Reconnect Gmail" banner when the refresh token has
+    been revoked/expired (status = 'needs_reconnect')."""
+    mailbox = await supabase_get_mailbox_by_user_id(
+        user_id=user["id"],
+        provider="gmail",
+    )
+    if not mailbox:
+        return {"status": "ok", "mailbox_status": "no_mailbox", "email": None}
+    return {
+        "status": "ok",
+        "mailbox_status": mailbox.get("status") or "unknown",
+        "email": mailbox.get("email_address"),
+    }
 
 
 @app.patch("/api/preferences/me")
