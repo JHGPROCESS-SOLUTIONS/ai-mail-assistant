@@ -3135,12 +3135,33 @@ E-mail:
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
-    # ============ COMPLIANCE OVERRIDE — UNSUBSCRIBE / OPT-OUT ============
-    # Safety net: if a clear unsubscribe request slipped past the classifier
-    # (or it labelled it Ignore/Marketing/Notification/FYI), force To Respond.
-    # GDPR/AVG opt-out compliance trumps the AI's judgement — we never want
-    # an unsubscribe request to silently end up in Ignore.
-    if label in ("Ignore", "Marketing", "Notification", "FYI"):
+    # ============ POST-CLASSIFICATION OVERRIDES ============
+    # These are belt-and-braces safety nets that apply AFTER the AI classifier.
+    # Order matters: noreply check first (a noreply "unsubscribe confirmed"
+    # is a notification, not a real opt-out request from a person).
+    sender_addr = extract_email_address(sender)
+    sender_is_noreply = is_noreply_sender(sender_addr)
+
+    # 1) NOREPLY → never get To Respond / Priority. You can't reply to them.
+    if sender_is_noreply and label in ("To Respond", "Priority"):
+        print(
+            f"[classify_email] Noreply override: '{label}' -> 'Notification' "
+            f"because sender '{sender_addr}' is a noreply / system address"
+        )
+        return {
+            "label": "Notification",
+            "reason": (
+                f"Noreply override: sender '{sender_addr}' cannot receive replies. "
+                f"Classifier originally said '{label}'."
+            ),
+            "confidence": "high",
+            "generate_draft": LABEL_RULES["Notification"]["generate_draft"],
+        }
+
+    # 2) UNSUBSCRIBE / OPT-OUT — but only when sender is a real person.
+    # A noreply system saying "you have been unsubscribed" is just a
+    # notification of an event, not a request the user must process.
+    if not sender_is_noreply and label in ("Ignore", "Marketing", "Notification", "FYI"):
         if detect_unsubscribe_request(subject, body_text):
             print(
                 f"[classify_email] Compliance override: '{label}' -> 'To Respond' "
@@ -3157,26 +3178,6 @@ E-mail:
                 "confidence": "high",
                 "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
             }
-
-    # ============ NOREPLY OVERRIDE — never To Respond / Priority / Follow Up ============
-    # Mails from noreply / donotreply / system senders cannot be replied to.
-    # Down-rank them to Notification so they show up in the right inbox section
-    # but don't get a meaningless AI-drafted "thanks for your notice" reply.
-    sender_addr = extract_email_address(sender)
-    if is_noreply_sender(sender_addr) and label in ("To Respond", "Priority", "Follow Up"):
-        print(
-            f"[classify_email] Noreply override: '{label}' -> 'Notification' "
-            f"because sender '{sender_addr}' is a noreply / system address"
-        )
-        return {
-            "label": "Notification",
-            "reason": (
-                f"Noreply override: sender '{sender_addr}' cannot receive replies. "
-                f"Classifier originally said '{label}'."
-            ),
-            "confidence": "high",
-            "generate_draft": LABEL_RULES["Notification"]["generate_draft"],
-        }
 
     return {
         "label": label,
@@ -3324,10 +3325,29 @@ E-mail:
             "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
         }
 
-    # ============ COMPLIANCE OVERRIDE — UNSUBSCRIBE / OPT-OUT ============
-    # Same safety net as classify_email: a mid-thread unsubscribe request
-    # must always surface as To Respond, never get buried in Done/Ignore/etc.
-    if label in ("Done", "Ignore", "Notification", "FYI", "Waiting On Reply"):
+    # ============ POST-CLASSIFICATION OVERRIDES ============
+    # Same two safety nets as classify_email. Order matters.
+    sender_addr = extract_email_address(sender)
+    sender_is_noreply = is_noreply_sender(sender_addr)
+
+    # 1) NOREPLY → never To Respond / Priority. You can't reply to them.
+    if sender_is_noreply and label in ("To Respond", "Priority"):
+        print(
+            f"[classify_follow_up_email] Noreply override: '{label}' -> 'Notification' "
+            f"because sender '{sender_addr}' is a noreply / system address"
+        )
+        return {
+            "label": "Notification",
+            "reason": (
+                f"Noreply override: sender '{sender_addr}' cannot receive replies. "
+                f"Classifier originally said '{label}'."
+            ),
+            "confidence": "high",
+            "generate_draft": LABEL_RULES["Notification"]["generate_draft"],
+        }
+
+    # 2) UNSUBSCRIBE — only for real human senders (not noreply confirmations).
+    if not sender_is_noreply and label in ("Done", "Ignore", "Notification", "FYI", "Waiting On Reply"):
         if detect_unsubscribe_request(subject, body_text):
             print(
                 f"[classify_follow_up_email] Compliance override: '{label}' -> 'To Respond' "
