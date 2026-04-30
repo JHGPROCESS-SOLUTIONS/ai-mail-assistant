@@ -336,6 +336,37 @@ def extract_email_address(from_header: str | None) -> str | None:
     return from_header.strip()
 
 
+# Sender addresses that explicitly say "do not reply" should never receive
+# an AI-drafted response — you literally cannot reply to them. Detected by
+# common patterns in the local-part of the email address.
+_NOREPLY_LOCAL_PATTERNS = re.compile(
+    r"(^|[._\-+])"
+    r"("
+    r"noreply|no\-reply|donotreply|do\-not\-reply|"
+    r"notifications?|notify|"
+    r"mailer\-daemon|postmaster|"
+    r"automated|auto\-?confirm|auto\-?reply|"
+    r"bounce|bounces|"
+    r"system|notice|alerts?"
+    r")"
+    r"($|[._\-+@])",
+    re.IGNORECASE,
+)
+
+
+def is_noreply_sender(sender_email: str | None) -> bool:
+    """True for senders we should never auto-draft a reply to: noreply/donotreply
+    style addresses, mailer-daemons, automated alerts. The check is on the
+    local part (before the @) so 'ads-account-noreply@google.com' matches."""
+    if not sender_email:
+        return False
+    addr = sender_email.strip().lower()
+    if "@" not in addr:
+        return False
+    local = addr.split("@", 1)[0]
+    return bool(_NOREPLY_LOCAL_PATTERNS.search(local))
+
+
 def normalize_subject_for_reply(subject: str | None) -> str:
     if not subject:
         return "Re:"
@@ -3127,6 +3158,26 @@ E-mail:
                 "generate_draft": LABEL_RULES["To Respond"]["generate_draft"],
             }
 
+    # ============ NOREPLY OVERRIDE — never To Respond / Priority / Follow Up ============
+    # Mails from noreply / donotreply / system senders cannot be replied to.
+    # Down-rank them to Notification so they show up in the right inbox section
+    # but don't get a meaningless AI-drafted "thanks for your notice" reply.
+    sender_addr = extract_email_address(sender)
+    if is_noreply_sender(sender_addr) and label in ("To Respond", "Priority", "Follow Up"):
+        print(
+            f"[classify_email] Noreply override: '{label}' -> 'Notification' "
+            f"because sender '{sender_addr}' is a noreply / system address"
+        )
+        return {
+            "label": "Notification",
+            "reason": (
+                f"Noreply override: sender '{sender_addr}' cannot receive replies. "
+                f"Classifier originally said '{label}'."
+            ),
+            "confidence": "high",
+            "generate_draft": LABEL_RULES["Notification"]["generate_draft"],
+        }
+
     return {
         "label": label,
         "reason": reason,
@@ -4248,12 +4299,24 @@ async def process_inbox_for_user(
         except Exception as exc:
             print(f"[attachment-ai] outer error for message {message_id}: {repr(exc)}")
 
+        # Hard guard: never draft a reply to a noreply / donotreply / system
+        # sender. You literally cannot reply to them and any AI draft would
+        # echo their notice back at /dev/null. Common case: Google Ads
+        # ads-account-noreply@google.com, Stripe receipts, etc.
+        sender_is_noreply = is_noreply_sender(extract_email_address(from_header))
+        if sender_is_noreply:
+            print(
+                f"[draft-skip] Skipping draft for message {message_id}: "
+                f"sender '{from_header}' is a noreply / system address."
+            )
+
         should_generate_draft = (
             LABEL_RULES[target_label]["generate_draft"]
             and not is_marketing_tab
             and not is_social_tab
             and not is_updates_tab
             and not has_open_draft
+            and not sender_is_noreply
         )
 
         draft_created = False
