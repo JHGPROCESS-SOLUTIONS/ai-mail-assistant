@@ -6093,6 +6093,108 @@ async def api_update_my_preferences(
     return {"status": "ok", "settings": saved}
 
 
+# ============================================================
+# /api/me/* — JWT-AUTHENTICATED self-service endpoints
+# These wrap older email-keyed endpoints (/briefing/settings,
+# /settings/style-profile) so the dashboard never has to send
+# the user's email as a stand-in for identity.
+# ============================================================
+class BriefingSettingsBody(BaseModel):
+    enabled: bool | None = None
+    hour: int | None = None
+    minute: int | None = None
+    timezone_name: str | None = None
+
+
+def _briefing_response(mailbox: dict[str, Any]) -> dict[str, Any]:
+    """Shape the public briefing-settings JSON response from a mailbox row."""
+    return {
+        "status": "ok",
+        "briefing_enabled": bool(mailbox.get("briefing_enabled", False)),
+        "briefing_hour": int(mailbox.get("briefing_hour") or 7),
+        "briefing_minute": int(mailbox.get("briefing_minute") or 0),
+        "briefing_timezone": mailbox.get("briefing_timezone") or "Europe/Amsterdam",
+        "briefing_last_sent_at": mailbox.get("briefing_last_sent_at"),
+        "email_address": mailbox.get("email_address"),
+    }
+
+
+@app.get("/api/me/briefing-settings")
+async def api_get_my_briefing_settings(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return current briefing preferences for the logged-in user's Gmail mailbox."""
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user["id"], provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde Gmail mailbox")
+    return _briefing_response(mailbox)
+
+
+@app.patch("/api/me/briefing-settings")
+async def api_update_my_briefing_settings(
+    body: BriefingSettingsBody,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Update briefing preferences for the logged-in user. JWT-authenticated
+    counterpart of the legacy POST /briefing/settings endpoint."""
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user["id"], provider="gmail")
+    if not mailbox:
+        raise HTTPException(status_code=404, detail="Geen gekoppelde Gmail mailbox")
+
+    patch: dict[str, Any] = {}
+    if body.enabled is not None:
+        patch["briefing_enabled"] = bool(body.enabled)
+    if body.hour is not None:
+        patch["briefing_hour"] = max(0, min(23, int(body.hour)))
+    if body.minute is not None:
+        patch["briefing_minute"] = max(0, min(59, int(body.minute)))
+    if body.timezone_name:
+        # Cap length to avoid abuse; Postgres column is text but no point
+        # in accepting unbounded input here.
+        patch["briefing_timezone"] = str(body.timezone_name)[:64]
+
+    if not patch:
+        return _briefing_response(mailbox)
+
+    try:
+        updated = await supabase_patch(
+            f"/rest/v1/mailboxes?id=eq.{mailbox['id']}",
+            patch,
+            prefer="return=representation",
+        )
+    except Exception as exc:
+        print(f"[briefing-settings] patch failed for user {user['id']}: {repr(exc)}")
+        raise HTTPException(status_code=500, detail=f"Update mislukt: {exc}")
+
+    final = updated[0] if isinstance(updated, list) and updated else {**mailbox, **patch}
+    return _briefing_response(final)
+
+
+@app.get("/api/me/style-profile")
+async def api_get_my_style_profile(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Return the learned style profile for the logged-in user, or a
+    has_profile=false response if none has been generated yet."""
+    profile = await supabase_get_user_style_profile(user["id"])
+    if not profile:
+        return {
+            "status": "ok",
+            "has_profile": False,
+            "style_profile": None,
+        }
+    return {
+        "status": "ok",
+        "has_profile": True,
+        "style_profile": {
+            "style_profile_text": profile.get("style_profile_text"),
+            "style_profile_json": profile.get("style_profile_json") or {},
+            "source_sent_count": profile.get("source_sent_count"),
+            "last_trained_at": profile.get("last_trained_at"),
+        },
+    }
+
+
 @app.post("/onboarding/complete")
 async def onboarding_complete(payload: OnboardingCompletePayload):
     user = await ensure_user_has_access(payload.email)
