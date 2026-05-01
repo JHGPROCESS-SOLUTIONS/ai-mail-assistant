@@ -164,6 +164,12 @@ LOW_VALUE_LABELS = {
     "Ignore",
 }
 
+# Snooze label — applied when a user temporarily removes a mail from Inbox.
+# Lives under the OfficeFlow/ namespace because it's a workflow label (not
+# a classification label) and we want it visually grouped with our other
+# meta-labels in Gmail.
+SNOOZED_LABEL = "OfficeFlow/Snoozed"
+
 # Notification is opt-in (notification_auto_archive on mailbox) because
 # notifications are often transactional (banking, delivery, 2FA, tax) and
 # users may want to keep seeing them in their primary inbox.
@@ -1585,6 +1591,149 @@ async def supabase_get_scheduled_send_by_id(
     return None
 
 
+# ============================================================
+# SNOOZED EMAILS — Supabase helpers
+# ============================================================
+async def supabase_insert_snoozed_email(
+    *,
+    user_id: str,
+    mailbox_id: str,
+    email_id: str,
+    gmail_message_id: str,
+    gmail_thread_id: str | None,
+    subject: str | None,
+    original_label: str | None,
+    original_label_id: str | None,
+    wake_at_iso: str,
+) -> dict[str, Any]:
+    data = await supabase_post(
+        "/rest/v1/snoozed_emails",
+        [{
+            "user_id": user_id,
+            "mailbox_id": mailbox_id,
+            "email_id": email_id,
+            "gmail_message_id": gmail_message_id,
+            "gmail_thread_id": gmail_thread_id,
+            "subject": subject,
+            "original_label": original_label,
+            "original_label_id": original_label_id,
+            "wake_at": wake_at_iso,
+            "status": "pending",
+        }],
+        prefer="return=representation",
+    )
+    if not isinstance(data, list) or not data:
+        raise HTTPException(status_code=500, detail="Failed to create snooze")
+    return data[0]
+
+
+async def supabase_get_user_snoozed_emails(
+    user_id: str,
+    statuses: list[str] | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    status_filter = ""
+    if statuses:
+        joined = ",".join(quote(s, safe="") for s in statuses)
+        status_filter = f"&status=in.({joined})"
+    data = await supabase_get(
+        f"/rest/v1/snoozed_emails"
+        f"?user_id=eq.{quote(user_id, safe='')}"
+        f"{status_filter}"
+        f"&order=wake_at.asc"
+        f"&limit={limit}"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
+async def supabase_get_due_snoozed_emails(limit: int = 50) -> list[dict[str, Any]]:
+    now_iso = datetime.now(timezone.utc).isoformat()
+    data = await supabase_get(
+        f"/rest/v1/snoozed_emails"
+        f"?status=eq.pending"
+        f"&wake_at=lte.{quote(now_iso, safe='')}"
+        f"&order=wake_at.asc"
+        f"&limit={limit}"
+        f"&select=*"
+    )
+    return data if isinstance(data, list) else []
+
+
+async def supabase_update_snoozed_email(
+    snooze_id: str,
+    *,
+    status: str,
+    woken_at: str | None = None,
+    error_message: str | None = None,
+) -> dict[str, Any] | None:
+    payload: dict[str, Any] = {"status": status}
+    if woken_at is not None:
+        payload["woken_at"] = woken_at
+    if error_message is not None:
+        payload["error_message"] = error_message
+    data = await supabase_patch(
+        f"/rest/v1/snoozed_emails?id=eq.{quote(snooze_id, safe='')}",
+        payload,
+    )
+    return data[0] if isinstance(data, list) and data else data
+
+
+async def supabase_get_snoozed_email_by_id(
+    snooze_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Look up a single snooze row scoped to the requesting user (security)."""
+    data = await supabase_get(
+        f"/rest/v1/snoozed_emails"
+        f"?id=eq.{quote(snooze_id, safe='')}"
+        f"&user_id=eq.{quote(user_id, safe='')}"
+        f"&select=*"
+    )
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
+async def supabase_get_pending_snooze_for_email(
+    *,
+    email_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Return the active (pending) snooze row for a given email, if any.
+
+    Used by the snooze-create endpoint as a friendly pre-check (the partial
+    unique index ultimately enforces this) and by the cancel-by-email-id path.
+    """
+    data = await supabase_get(
+        f"/rest/v1/snoozed_emails"
+        f"?email_id=eq.{quote(email_id, safe='')}"
+        f"&user_id=eq.{quote(user_id, safe='')}"
+        f"&status=eq.pending"
+        f"&select=*"
+        f"&limit=1"
+    )
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
+async def supabase_get_email_by_id(
+    email_id: str,
+    user_id: str,
+) -> dict[str, Any] | None:
+    """Look up an emails-table row scoped to the requesting user."""
+    data = await supabase_get(
+        f"/rest/v1/emails"
+        f"?id=eq.{quote(email_id, safe='')}"
+        f"&user_id=eq.{quote(user_id, safe='')}"
+        f"&select=*"
+    )
+    if isinstance(data, list) and data:
+        return data[0]
+    return None
+
+
 def _mailbox_cutoff_epoch(mailbox: dict[str, Any] | None) -> int | None:
     """Return the mailbox's inbox_cutoff_at as Unix epoch seconds.
 
@@ -2423,6 +2572,191 @@ async def is_trusted_sender(
     if cache is not None:
         cache[normalized] = trusted
     return trusted
+
+
+# ============================================================
+# SNOOZE — Gmail-level helpers
+# ============================================================
+async def snooze_thread_in_gmail(
+    *,
+    user_id: str,
+    gmail_message_id: str,
+    gmail_thread_id: str | None,
+    original_label_id: str | None,
+    snoozed_label_id: str,
+) -> None:
+    """Hide a mail/thread from Inbox by removing INBOX + the original status
+    label and adding the OfficeFlow/Snoozed label.
+
+    Applied to every message in the thread so the thread fully disappears
+    from Inbox view (Gmail shows a thread in Inbox if any of its messages
+    has the INBOX label).
+
+    Best-effort: per-message exceptions are logged but don't abort the loop;
+    the wake worker rebuilds state from `original_label_id` regardless.
+    """
+    remove_ids = ["INBOX"]
+    if original_label_id:
+        remove_ids.append(original_label_id)
+    add_ids = [snoozed_label_id]
+
+    if not gmail_thread_id:
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc:
+            print(f"[snooze] msg {gmail_message_id}: {repr(exc)}")
+        return
+
+    try:
+        thread_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads/{gmail_thread_id}",
+        )
+    except Exception as exc:
+        print(f"[snooze] thread fetch {gmail_thread_id}: {repr(exc)}")
+        # Fallback: at least snooze the trigger message
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc2:
+            print(f"[snooze] fallback msg {gmail_message_id}: {repr(exc2)}")
+        return
+
+    for thread_message in thread_data.get("messages", []) or []:
+        thread_message_id = thread_message.get("id")
+        if not thread_message_id:
+            continue
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=thread_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc:
+            print(f"[snooze] msg {thread_message_id}: {repr(exc)}")
+
+
+async def wake_thread_in_gmail(
+    *,
+    user_id: str,
+    gmail_message_id: str,
+    gmail_thread_id: str | None,
+    original_label_id: str | None,
+    snoozed_label_id: str | None,
+) -> None:
+    """Restore a snoozed mail/thread to Inbox: add INBOX + original status
+    label back, remove the OfficeFlow/Snoozed label.
+
+    Mirror of snooze_thread_in_gmail. Safe to call multiple times — Gmail
+    treats add/remove of an already-correct label as a no-op.
+    """
+    add_ids = ["INBOX"]
+    if original_label_id:
+        add_ids.append(original_label_id)
+    remove_ids = [snoozed_label_id] if snoozed_label_id else []
+
+    if not gmail_thread_id:
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc:
+            print(f"[wake] msg {gmail_message_id}: {repr(exc)}")
+        return
+
+    try:
+        thread_data = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/threads/{gmail_thread_id}",
+        )
+    except Exception as exc:
+        print(f"[wake] thread fetch {gmail_thread_id}: {repr(exc)}")
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=gmail_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc2:
+            print(f"[wake] fallback msg {gmail_message_id}: {repr(exc2)}")
+        return
+
+    for thread_message in thread_data.get("messages", []) or []:
+        thread_message_id = thread_message.get("id")
+        if not thread_message_id:
+            continue
+        try:
+            await modify_gmail_message_labels(
+                user_id=user_id,
+                gmail_message_id=thread_message_id,
+                add_label_ids=add_ids,
+                remove_label_ids=remove_ids,
+            )
+        except Exception as exc:
+            print(f"[wake] msg {thread_message_id}: {repr(exc)}")
+
+
+async def detect_current_status_label(
+    *,
+    user_id: str,
+    gmail_message_id: str,
+) -> tuple[str | None, str | None]:
+    """Inspect the message's current Gmail labels and return the (name, id)
+    of the OfficeFlow status label currently on it, if any.
+
+    Returns (None, None) if the mail is unclassified (e.g. brand-new mail
+    that hasn't been processed yet, or one that was already manually moved
+    out of all status labels).
+    """
+    try:
+        msg = await gmail_get_json_for_user(
+            user_id=user_id,
+            url=f"{GMAIL_API_BASE}/messages/{gmail_message_id}",
+            params={"format": "minimal"},
+        )
+    except Exception as exc:
+        print(f"[snooze] detect-status fetch {gmail_message_id}: {repr(exc)}")
+        return (None, None)
+
+    current_label_ids = set(msg.get("labelIds", []) or [])
+    if not current_label_ids:
+        return (None, None)
+
+    # Resolve user's full label map once. We compare BY name so we tolerate
+    # "Priority" and "OfficeFlow/Priority" as the same logical label.
+    label_map = await get_all_gmail_labels(user_id)
+    # Build inverse: label_id -> label_name
+    id_to_name: dict[str, str] = {}
+    for name, label in label_map.items():
+        lbl_id = label.get("id") if isinstance(label, dict) else None
+        if lbl_id:
+            id_to_name[lbl_id] = name
+
+    canonical_set = set(LABELS)
+    for lbl_id in current_label_ids:
+        name = id_to_name.get(lbl_id)
+        if not name:
+            continue
+        # Strip the legacy "OfficeFlow/" prefix when matching.
+        canonical = LEGACY_LABEL_NAME_MAP.get(name, name)
+        if canonical in canonical_set:
+            return (canonical, lbl_id)
+
+    return (None, None)
 
 
 async def ensure_label_exists(user_id: str, label_name: str) -> str:
@@ -4866,12 +5200,90 @@ async def scheduled_send_loop():
         await asyncio.sleep(SCHEDULED_SEND_INTERVAL_SECONDS)
 
 
+SNOOZE_WAKE_INTERVAL_SECONDS = int(os.getenv("SNOOZE_WAKE_INTERVAL_SECONDS", "60"))
+
+
+async def snooze_wake_loop():
+    """Background dispatcher for waking snoozed mails. Runs every
+    SNOOZE_WAKE_INTERVAL_SECONDS, picks up rows where status='pending'
+    AND wake_at <= now(), and restores each mail's INBOX + original status
+    label via Gmail API.
+
+    Failure modes (all marked 'failed' with error_message — never retried):
+      - mailbox token revoked
+      - mail was permanently deleted in Gmail
+      - any other Gmail API error
+    """
+    await asyncio.sleep(15)
+
+    while True:
+        try:
+            due_rows = await supabase_get_due_snoozed_emails(limit=50)
+            if due_rows:
+                print(f"[snooze-wake] Waking {len(due_rows)} due snooze(s)")
+
+            for row in due_rows:
+                row_id = row.get("id")
+                user_id = row.get("user_id")
+                gmail_message_id = row.get("gmail_message_id")
+                gmail_thread_id = row.get("gmail_thread_id")
+                original_label_id = row.get("original_label_id")
+                if not (row_id and user_id and gmail_message_id):
+                    continue
+
+                try:
+                    # Resolve Snoozed label id fresh — could have been
+                    # deleted by the user between snooze and wake.
+                    snoozed_label_id = None
+                    try:
+                        snoozed_label_id = await ensure_label_exists(
+                            user_id=user_id,
+                            label_name=SNOOZED_LABEL,
+                        )
+                    except Exception as exc:
+                        print(f"[snooze-wake] could not resolve Snoozed label "
+                              f"for user {user_id}: {repr(exc)}")
+
+                    await wake_thread_in_gmail(
+                        user_id=user_id,
+                        gmail_message_id=gmail_message_id,
+                        gmail_thread_id=gmail_thread_id,
+                        original_label_id=original_label_id,
+                        snoozed_label_id=snoozed_label_id,
+                    )
+                    await supabase_update_snoozed_email(
+                        snooze_id=row_id,
+                        status="woken",
+                        woken_at=datetime.now(timezone.utc).isoformat(),
+                    )
+                    print(f"[snooze-wake] Woke mail {gmail_message_id} for user {user_id}")
+                except Exception as exc:
+                    err = repr(exc)[:480]
+                    try:
+                        await supabase_update_snoozed_email(
+                            snooze_id=row_id,
+                            status="failed",
+                            error_message=err,
+                        )
+                    except Exception:
+                        pass
+                    print(f"[snooze-wake] FAILED mail {gmail_message_id} "
+                          f"(user {user_id}): {err}")
+
+        except Exception as exc:
+            print(f"[snooze-wake] loop error: {repr(exc)}")
+
+        await asyncio.sleep(SNOOZE_WAKE_INTERVAL_SECONDS)
+
+
 @app.on_event("startup")
 async def start_background_tasks():
     print("Multi-tenant auto processor started")
     asyncio.create_task(auto_process_loop())
     print("Scheduled-send dispatcher started")
     asyncio.create_task(scheduled_send_loop())
+    print("Snooze wake dispatcher started")
+    asyncio.create_task(snooze_wake_loop())
 
 
 # ----------------------------
@@ -5467,6 +5879,180 @@ async def api_cancel_scheduled_send(
         status="cancelled",
     )
     return {"status": "ok", "scheduled_send": updated}
+
+
+# ============ SNOOZE ============
+class SnoozeCreate(BaseModel):
+    wake_at: str  # ISO 8601, with or without trailing Z
+
+
+@app.post("/api/emails/{email_id}/snooze")
+async def api_snooze_email(
+    email_id: str,
+    body: SnoozeCreate,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Snooze a mail: remove from Inbox + status label, add OfficeFlow/Snoozed
+    label. Wake worker restores it at wake_at.
+    """
+    # 1) Validate wake_at is parseable and in the future (with 30s grace).
+    try:
+        when = datetime.fromisoformat(body.wake_at.replace("Z", "+00:00"))
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid wake_at — expected ISO 8601")
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    if when < now + timedelta(seconds=30):
+        raise HTTPException(status_code=400, detail="wake_at must be at least 30s in the future")
+
+    # 2) Resolve email + verify ownership.
+    email_row = await supabase_get_email_by_id(email_id=email_id, user_id=user["id"])
+    if not email_row:
+        raise HTTPException(status_code=404, detail="Email not found")
+
+    gmail_message_id = email_row.get("gmail_message_id")
+    gmail_thread_id = email_row.get("gmail_thread_id")
+    mailbox_id = email_row.get("mailbox_id")
+    if not (gmail_message_id and mailbox_id):
+        raise HTTPException(status_code=400, detail="Email missing Gmail/mailbox link")
+
+    # 3) Mailbox must be connected.
+    mailbox = await supabase_get_mailbox_by_user_id(user_id=user["id"], provider="gmail")
+    if not mailbox or mailbox.get("status") != "connected":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Mailbox not connected (status={mailbox.get('status') if mailbox else 'missing'})",
+        )
+
+    # 4) Reject double-snooze proactively (the partial unique index also enforces this).
+    existing = await supabase_get_pending_snooze_for_email(
+        email_id=email_id, user_id=user["id"],
+    )
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail="Email is already snoozed",
+        )
+
+    # 5) Detect current OfficeFlow status label so we can restore it on wake.
+    original_label, original_label_id = await detect_current_status_label(
+        user_id=user["id"], gmail_message_id=gmail_message_id,
+    )
+
+    # 6) Resolve (or create) the Snoozed label id.
+    try:
+        snoozed_label_id = await ensure_label_exists(
+            user_id=user["id"], label_name=SNOOZED_LABEL,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Could not create Snoozed label: {exc}")
+
+    # 7) Apply the Gmail label change FIRST. If it fails we don't want a
+    #    pending DB row that doesn't reflect Gmail state.
+    try:
+        await snooze_thread_in_gmail(
+            user_id=user["id"],
+            gmail_message_id=gmail_message_id,
+            gmail_thread_id=gmail_thread_id,
+            original_label_id=original_label_id,
+            snoozed_label_id=snoozed_label_id,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Gmail snooze failed: {exc}")
+
+    # 8) Persist the snooze row. If this fails we have a Gmail-snoozed mail
+    #    with no DB record — the wake worker won't restore it. Surface clearly.
+    try:
+        row = await supabase_insert_snoozed_email(
+            user_id=user["id"],
+            mailbox_id=mailbox_id,
+            email_id=email_id,
+            gmail_message_id=gmail_message_id,
+            gmail_thread_id=gmail_thread_id,
+            subject=email_row.get("subject"),
+            original_label=original_label,
+            original_label_id=original_label_id,
+            wake_at_iso=when.isoformat(),
+        )
+    except Exception as exc:
+        # Best-effort rollback: put the mail back in Inbox so user isn't
+        # left with a "ghost snooze" we can't track.
+        try:
+            await wake_thread_in_gmail(
+                user_id=user["id"],
+                gmail_message_id=gmail_message_id,
+                gmail_thread_id=gmail_thread_id,
+                original_label_id=original_label_id,
+                snoozed_label_id=snoozed_label_id,
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"Snooze persist failed: {exc}")
+
+    return {"status": "ok", "snooze": row}
+
+
+@app.get("/api/emails/snoozed")
+async def api_list_snoozed(
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """List the user's snoozes. Returns pending + recently woken/cancelled/failed
+    so the dashboard can show full history."""
+    rows = await supabase_get_user_snoozed_emails(
+        user_id=user["id"],
+        statuses=["pending", "woken", "cancelled", "failed"],
+        limit=100,
+    )
+    return {"status": "ok", "items": rows}
+
+
+@app.delete("/api/emails/{email_id}/snooze")
+async def api_cancel_snooze_for_email(
+    email_id: str,
+    user: dict[str, Any] = Depends(get_current_user),
+):
+    """Cancel a pending snooze for a given email — wake the mail right now."""
+    row = await supabase_get_pending_snooze_for_email(
+        email_id=email_id, user_id=user["id"],
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="No pending snooze for this email")
+
+    snoozed_label_id = None
+    try:
+        snoozed_label_id = await ensure_label_exists(
+            user_id=user["id"], label_name=SNOOZED_LABEL,
+        )
+    except Exception as exc:
+        print(f"[snooze-cancel] could not resolve Snoozed label "
+              f"for user {user['id']}: {repr(exc)}")
+
+    try:
+        await wake_thread_in_gmail(
+            user_id=user["id"],
+            gmail_message_id=row.get("gmail_message_id"),
+            gmail_thread_id=row.get("gmail_thread_id"),
+            original_label_id=row.get("original_label_id"),
+            snoozed_label_id=snoozed_label_id,
+        )
+    except Exception as exc:
+        # Mark failed so we don't keep the row in pending forever, but still
+        # surface the error to the caller.
+        try:
+            await supabase_update_snoozed_email(
+                snooze_id=row["id"], status="failed", error_message=repr(exc)[:480],
+            )
+        except Exception:
+            pass
+        raise HTTPException(status_code=502, detail=f"Gmail wake failed: {exc}")
+
+    updated = await supabase_update_snoozed_email(
+        snooze_id=row["id"],
+        status="cancelled",
+        woken_at=datetime.now(timezone.utc).isoformat(),
+    )
+    return {"status": "ok", "snooze": updated}
 
 
 # ============ ATTACHMENT SUMMARIES ============
