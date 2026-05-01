@@ -1,58 +1,19 @@
-OFFICEFLOW_LABELS = [
-    "OfficeFlow/To Respond",
-    "OfficeFlow/FYI",
-    "OfficeFlow/Notification",
-    "OfficeFlow/Marketing",
-]
+# DEPRECATED — DO NOT USE
+#
+# This module previously created only 4 Gmail labels (To Respond, FYI,
+# Notification, Marketing) and is missing the rest of the canonical label
+# set (Priority, Waiting On Reply, Follow Up, Done, Ignore).
+#
+# The canonical, complete label setup lives in app/main.py:
+#   - LABELS                       — list of all 9 status labels
+#   - setup_gmail_labels_for_mailbox()  — creates every label for a mailbox
+#   - LEGACY_LABEL_NAME_MAP        — handles "OfficeFlow/<name>" migration
+#
+# Importing from this file now raises so we never accidentally regress to
+# an incomplete setup. Delete this file via your Git client when you can.
 
-
-def setup_gmail_labels_for_tenant(
-    *,
-    user_id: str,
-    tenant_id: str,
-    supabase,
-    gmail_get_json_for_user,
-    gmail_post_json_for_user,
-):
-    existing = gmail_get_json_for_user(
-        user_id=user_id,
-        path="/gmail/v1/users/me/labels"
-    )
-
-    existing_map = {
-        label["name"]: label["id"]
-        for label in existing.get("labels", [])
-    }
-
-    results = []
-
-    for label_name in OFFICEFLOW_LABELS:
-        if label_name in existing_map:
-            label_id = existing_map[label_name]
-        else:
-            created = gmail_post_json_for_user(
-                user_id=user_id,
-                path="/gmail/v1/users/me/labels",
-                payload={
-                    "name": label_name,
-                    "labelListVisibility": "labelShow",
-                    "messageListVisibility": "show",
-                },
-            )
-            label_id = created["id"]
-
-        supabase.table("gmail_labels").upsert(
-            {
-                "tenant_id": tenant_id,
-                "label_name": label_name,
-                "label_id": label_id,
-            },
-            on_conflict="tenant_id,label_name",
-        ).execute()
-
-        results.append({
-            "label_name": label_name,
-            "label_id": label_id,
-        })
-
-    return results
+raise ImportError(
+    "services/setup_labels.py is deprecated. Use "
+    "app.main.setup_gmail_labels_for_mailbox() — it creates the full "
+    "9-label canonical set, not just 4."
+)

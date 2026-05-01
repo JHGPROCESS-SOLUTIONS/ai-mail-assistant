@@ -162,7 +162,6 @@ SENT_REPLY_STATUS_LABELS = {
 LOW_VALUE_LABELS = {
     "Marketing",
     "Ignore",
-    "Unwanted",
 }
 
 # Notification is opt-in (notification_auto_archive on mailbox) because
@@ -2324,7 +2323,7 @@ async def archive_low_value_thread(
     """Remove the Gmail INBOX label from every message in a thread.
 
     The thread remains in All Mail and stays findable via its status label
-    (Marketing / Notification / Ignore / Unwanted). Nothing is trashed, no
+    (Marketing / Notification / Ignore). Nothing is trashed, no
     other labels are touched. Safe to call multiple times.
     """
     if not thread_id:
@@ -4593,7 +4592,7 @@ async def process_inbox_for_user(
         )
 
         # --- AUTO-ARCHIVE LOW-VALUE MAIL ---
-        # Safe set (Marketing / Ignore / Unwanted) is archived by default when
+        # Safe set (Marketing / Ignore) is archived by default when
         # auto_archive_low_value is on. Notification is opt-in via
         # notification_auto_archive because notifications are often transactional.
         # Guarded by the trust-list: bekende contacten worden nooit gearchiveerd.
@@ -6031,14 +6030,13 @@ async def stats_overview(user: dict[str, Any] = Depends(get_current_user)):
 
     if all_labels:
         try:
-            marketing_n, ignore_n, unwanted_n, followup_n, waiting_n = await asyncio.gather(
+            marketing_n, ignore_n, followup_n, waiting_n = await asyncio.gather(
                 _label_thread_count("Marketing"),
                 _label_thread_count("Ignore"),
-                _label_thread_count("Unwanted"),
                 _label_thread_count("Follow Up"),
                 _label_thread_count("Waiting On Reply"),
             )
-            spam_filtered = marketing_n + ignore_n + unwanted_n
+            spam_filtered = marketing_n + ignore_n
             followup_active = followup_n
             waiting_reply = waiting_n
         except Exception as exc:
@@ -6067,7 +6065,7 @@ CHATBOT_SYSTEM_PROMPT = """Je bent **Floor**, de vriendelijke OfficeFlow-assiste
 OfficeFlow is een Nederlandse SaaS voor MKB met 3 producten:
 
 **1. Mailbox Manager (solo)** — €24/mnd of €240/jaar (2 mnd gratis)
-- AI die Gmail-inbox begrijpt en 10 labels toepast (Priority, To Respond, Waiting On Reply, Follow Up, Done, FYI, Notification, Marketing, Ignore, Unwanted)
+- AI die Gmail-inbox begrijpt en 9 labels toepast (Priority, To Respond, Waiting On Reply, Follow Up, Done, FYI, Notification, Marketing, Ignore)
 - Concept-antwoorden in jouw eigen schrijfstijl
 - Follow-Up Radar (opvolg-concepten voor stille threads + open beloftes)
 - Auto-archive optioneel
