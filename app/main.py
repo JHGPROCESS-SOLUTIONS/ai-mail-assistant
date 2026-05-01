@@ -30,16 +30,21 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://officeflow-site-one.vercel.app",
         "https://officeflowcompany.com",
         "https://www.officeflowcompany.com",
-        "https://officeflow-site2.vercel.app",
+        # Local dev only — remove for production-only deploys
         "http://localhost:3000",
         "http://127.0.0.1:5500",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",
+        "Content-Type",
+        "X-Internal-Secret",
+        "X-Requested-With",
+    ],
+    max_age=3600,
 )
 
 app.include_router(billing_router)
@@ -51,6 +56,11 @@ GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 SUPABASE_JWT_SECRET = os.getenv("SUPABASE_JWT_SECRET")
+
+# Internal-only API secret. /internal/* endpoints require the header
+# `X-Internal-Secret: <value>` matching this env var. Used by cron jobs,
+# Railway-scheduled tasks, and admin scripts. NEVER expose in frontend.
+INTERNAL_API_SECRET = os.getenv("INTERNAL_API_SECRET")
 
 # Redirect after first-time password setup via invite email
 SUPABASE_SET_PASSWORD_URL = os.getenv(
@@ -1115,6 +1125,38 @@ async def get_current_user(
         raise HTTPException(status_code=403, detail="No user record found")
 
     return user
+
+
+# Constant-time comparison to avoid timing attacks on the shared secret.
+import hmac as _hmac
+
+
+async def require_internal_secret(
+    x_internal_secret: Optional[str] = Header(None, alias="X-Internal-Secret"),
+) -> None:
+    """FastAPI dependency for `/internal/*` endpoints. Requires the
+    X-Internal-Secret header to match the INTERNAL_API_SECRET env var.
+
+    Used to protect cron / scheduled / admin-only endpoints from being
+    called by anonymous internet traffic — those endpoints can trigger
+    expensive OpenAI / Gmail API operations on any email address, so
+    they must NEVER be open.
+
+    Set INTERNAL_API_SECRET on Railway and pass the same value as the
+    X-Internal-Secret header from cron jobs / admin scripts.
+    """
+    if not INTERNAL_API_SECRET:
+        # Fail closed: if the secret isn't configured, refuse all internal
+        # calls. This prevents accidental open-by-default behaviour.
+        raise HTTPException(
+            status_code=503,
+            detail="Internal API not configured (INTERNAL_API_SECRET missing)",
+        )
+
+    if not x_internal_secret or not _hmac.compare_digest(
+        x_internal_secret, INTERNAL_API_SECRET
+    ):
+        raise HTTPException(status_code=401, detail="Invalid internal secret")
 
 
 async def send_welcome_invite(email: str) -> bool:
@@ -4903,6 +4945,7 @@ async def gmail_inbox(email: str, max_results: int = 10):
 async def process_inbox_route(
     email: str = Body(...),
     max_results: int = Body(default=10),
+    _: None = Depends(require_internal_secret),
 ):
     result = await process_inbox_for_user(email=email, max_results=max_results)
 
@@ -5005,7 +5048,10 @@ async def gmail_mark_done(
 
 
 @app.post("/internal/setup-labels")
-async def setup_labels(email: str = Body(...)):
+async def setup_labels(
+    email: str = Body(...),
+    _: None = Depends(require_internal_secret),
+):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
     mailbox = context["mailbox"]
@@ -5024,7 +5070,10 @@ async def setup_labels(email: str = Body(...)):
 
 
 @app.post("/internal/cleanup-legacy-labels")
-async def cleanup_legacy_labels(email: str = Body(...)):
+async def cleanup_legacy_labels(
+    email: str = Body(...),
+    _: None = Depends(require_internal_secret),
+):
     context = await get_gmail_context_by_email(email)
     user = context["user"]
     mailbox = context["mailbox"]
@@ -5363,6 +5412,7 @@ async def get_style_profile(email: str):
 async def train_style_profile(
     email: str = Body(...),
     source_limit: int = Body(default=30),
+    _: None = Depends(require_internal_secret),
 ):
     user = await ensure_user_has_access(email)
 
@@ -5387,6 +5437,7 @@ async def train_style_profile(
 async def retrain_stale_style_profiles(
     age_days: int = 30,
     max_per_run: int = 50,
+    _: None = Depends(require_internal_secret),
 ):
     """
     Hertraint stijlprofielen die ouder zijn dan `age_days` dagen, voor users
@@ -7014,7 +7065,10 @@ async def get_relationship_for_contact(user_id: str, contact_email: str) -> dict
 # ---------------------------------------------------------------------------
 
 @app.post("/internal/send-briefing")
-async def http_send_briefing(email: str = Body(..., embed=True)):
+async def http_send_briefing(
+    email: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
+):
     """Manual trigger: sends morning briefing immediately to the given mailbox."""
     return await send_briefing_for_mailbox(email)
 
@@ -7024,6 +7078,7 @@ async def http_detect_commitment(
     email: str = Body(...),
     subject: str | None = Body(default=None),
     body_text: str = Body(...),
+    _: None = Depends(require_internal_secret),
 ):
     """Manual trigger: runs commitment detection on arbitrary text (for testing)."""
     return await detect_commitments_in_sent_mail(subject=subject, body_text=body_text)
@@ -7430,7 +7485,10 @@ async def radar_loop():
 # ---------------------------------------------------------------------------
 
 @app.post("/internal/follow-up-radar/run")
-async def http_run_follow_up_radar(email: str = Body(..., embed=True)):
+async def http_run_follow_up_radar(
+    email: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
+):
     """Manually trigger the radar for one mailbox. Use for QA/testing."""
     return await process_follow_up_radar_for_mailbox(email)
 
@@ -7438,6 +7496,7 @@ async def http_run_follow_up_radar(email: str = Body(..., embed=True)):
 @app.post("/internal/follow-up-radar/suppress")
 async def http_suppress_commitment_nudge(
     commitment_id: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
 ):
     """User can suppress nudging for a specific commitment (future UI hook)."""
     try:
@@ -7454,6 +7513,7 @@ async def http_suppress_commitment_nudge(
 @app.post("/internal/follow-up-radar/reset")
 async def http_reset_commitment_nudge(
     commitment_id: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
 ):
     """Clear nudge state so the commitment can be nudged again on next run."""
     try:
@@ -7797,7 +7857,10 @@ async def process_silence_radar_for_mailbox(email: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 @app.post("/internal/silence-radar/run")
-async def http_run_silence_radar(email: str = Body(..., embed=True)):
+async def http_run_silence_radar(
+    email: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
+):
     """Manually trigger the silence radar for one mailbox. Use for QA/testing."""
     return await process_silence_radar_for_mailbox(email)
 
@@ -7805,6 +7868,7 @@ async def http_run_silence_radar(email: str = Body(..., embed=True)):
 @app.post("/internal/silence-radar/suppress")
 async def http_suppress_awaiting_reply_nudge(
     awaiting_reply_id: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
 ):
     """User can suppress nudging for a specific awaiting_reply (future UI hook)."""
     try:
@@ -7821,6 +7885,7 @@ async def http_suppress_awaiting_reply_nudge(
 @app.post("/internal/silence-radar/reset")
 async def http_reset_awaiting_reply_nudge(
     awaiting_reply_id: str = Body(..., embed=True),
+    _: None = Depends(require_internal_secret),
 ):
     """Clear nudge state so the awaiting_reply can be nudged again on next run."""
     try:
