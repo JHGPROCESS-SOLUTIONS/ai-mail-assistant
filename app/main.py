@@ -91,6 +91,49 @@ AUTO_PROCESS_INTERVAL_SECONDS = int(os.getenv("AUTO_PROCESS_INTERVAL_SECONDS", "
 AUTO_PROCESS_MAX_RESULTS = int(os.getenv("AUTO_PROCESS_MAX_RESULTS", "10"))
 AUTO_PROCESS_MAX_CONCURRENCY = int(os.getenv("AUTO_PROCESS_MAX_CONCURRENCY", "10"))
 
+
+# ============================================================
+# STARTUP VALIDATION — fail fast on misconfiguration
+# ============================================================
+# Catches missing/empty env vars at module load (= Railway boot) instead of
+# at the first user request, hours into production. Without this, a typo in
+# any of the variables below would deploy successfully and silently break.
+def _validate_required_env_vars() -> None:
+    required: dict[str, str | None] = {
+        "GOOGLE_CLIENT_ID":           GOOGLE_CLIENT_ID,
+        "GOOGLE_CLIENT_SECRET":       GOOGLE_CLIENT_SECRET,
+        "GOOGLE_REDIRECT_URI":        GOOGLE_REDIRECT_URI,
+        "SUPABASE_URL":               SUPABASE_URL,
+        "SUPABASE_SERVICE_ROLE_KEY":  SUPABASE_SERVICE_ROLE_KEY,
+        "SUPABASE_JWT_SECRET":        SUPABASE_JWT_SECRET,
+        "OPENAI_API_KEY":             OPENAI_API_KEY,
+        "STRIPE_SECRET_KEY":          STRIPE_SECRET_KEY,
+        "STRIPE_WEBHOOK_SECRET":      STRIPE_WEBHOOK_SECRET,
+        "INTERNAL_API_SECRET":        INTERNAL_API_SECRET,
+    }
+    missing = [name for name, value in required.items() if not value]
+    if missing:
+        msg = (
+            "[STARTUP CHECK FAILED] Missing required env vars: "
+            + ", ".join(missing)
+            + ". Set them in Railway → Variables and redeploy."
+        )
+        print(msg, flush=True)
+        # SystemExit aborts module import → Railway marks the deploy as
+        # crashed, so the bad config is immediately visible.
+        raise SystemExit(msg)
+
+    # Print a concise OK line so we can verify in Railway logs that the
+    # check actually ran and all vars are present.
+    print(
+        f"[STARTUP CHECK OK] All {len(required)} required env vars set.",
+        flush=True,
+    )
+
+
+_validate_required_env_vars()
+
+
 GMAIL_SCOPE = "openid email profile https://www.googleapis.com/auth/gmail.modify"
 GMAIL_API_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 ALLOWED_SUBSCRIPTION_STATUSES = {"active", "trialing", "canceling"}
