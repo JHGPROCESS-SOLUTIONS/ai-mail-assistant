@@ -3679,7 +3679,9 @@ E-mail:
         }
 
     # 2) UNSUBSCRIBE — only for real human senders (not noreply confirmations).
-    if not sender_is_noreply and label in ("Done", "Ignore", "Notification", "FYI", "Waiting On Reply"):
+    # Marketing included to mirror initial classifier (classify_email) so
+    # opt-out / unsubscribe mails from real senders never get buried.
+    if not sender_is_noreply and label in ("Done", "Ignore", "Marketing", "Notification", "FYI", "Waiting On Reply"):
         if detect_unsubscribe_request(subject, body_text):
             print(
                 f"[classify_follow_up_email] Compliance override: '{label}' -> 'To Respond' "
