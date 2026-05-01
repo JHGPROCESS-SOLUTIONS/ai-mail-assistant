@@ -3067,8 +3067,22 @@ ATTACHMENT_MAX_TEXT_CHARS = int(os.getenv("ATTACHMENT_MAX_TEXT_CHARS", "30000"))
 SUPPORTED_ATTACHMENT_MIME_TYPES = {
     "application/pdf",
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # .docx
-    "application/msword",  # legacy .doc — pypdf/docx won't extract; will mark unsupported
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",        # .xlsx
+    "application/vnd.ms-excel.sheet.macroEnabled.12",                            # .xlsm
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", # .pptx
+    "text/csv",
+    "text/plain",
+    # Legacy formats (.doc, .xls, .ppt) are intentionally excluded — extraction
+    # is unreliable and Microsoft has long deprecated them.
 }
+
+# Hard caps on what we feed the LLM, per file. Keeps cost predictable on
+# huge spreadsheets / decks. Total text is also capped by
+# ATTACHMENT_MAX_TEXT_CHARS at the dispatcher level.
+ATTACHMENT_XLSX_MAX_SHEETS = int(os.getenv("ATTACHMENT_XLSX_MAX_SHEETS", "5"))
+ATTACHMENT_XLSX_MAX_ROWS_PER_SHEET = int(os.getenv("ATTACHMENT_XLSX_MAX_ROWS_PER_SHEET", "500"))
+ATTACHMENT_PPTX_MAX_SLIDES = int(os.getenv("ATTACHMENT_PPTX_MAX_SLIDES", "60"))
+ATTACHMENT_CSV_MAX_ROWS = int(os.getenv("ATTACHMENT_CSV_MAX_ROWS", "500"))
 
 # Only run attachment summarisation when the AI classified the mail into one
 # of these labels. Saves cost on Marketing / Notification / Ignore noise.
@@ -3159,19 +3173,191 @@ def extract_text_from_docx_bytes(blob: bytes) -> str:
         return ""
 
 
+def extract_text_from_xlsx_bytes(blob: bytes) -> str:
+    """Extract a textual representation of a .xlsx / .xlsm spreadsheet.
+    Returns each sheet as a header line followed by pipe-separated rows.
+    Bounded by ATTACHMENT_XLSX_MAX_SHEETS and ATTACHMENT_XLSX_MAX_ROWS_PER_SHEET
+    to keep cost predictable on multi-sheet workbooks.
+
+    Returns empty string on any failure.
+    """
+    try:
+        from openpyxl import load_workbook
+        from io import BytesIO
+        # data_only=True so Excel formula cells return their cached value
+        # instead of "=SUM(A1:A10)" which the LLM can't interpret.
+        wb = load_workbook(BytesIO(blob), data_only=True, read_only=True)
+        chunks: list[str] = []
+        for sheet_idx, sheet_name in enumerate(wb.sheetnames):
+            if sheet_idx >= ATTACHMENT_XLSX_MAX_SHEETS:
+                chunks.append(f"[…meer tabbladen overgeslagen ({len(wb.sheetnames) - sheet_idx})]")
+                break
+            ws = wb[sheet_name]
+            chunks.append(f"### Tabblad: {sheet_name}")
+            row_count = 0
+            for row in ws.iter_rows(values_only=True):
+                if row_count >= ATTACHMENT_XLSX_MAX_ROWS_PER_SHEET:
+                    chunks.append(f"[…meer rijen overgeslagen]")
+                    break
+                # Skip fully-empty rows
+                cells = ["" if c is None else str(c).strip() for c in row]
+                if not any(cells):
+                    continue
+                chunks.append(" | ".join(cells))
+                row_count += 1
+            chunks.append("")  # blank line between sheets
+        try:
+            wb.close()
+        except Exception:
+            pass
+        return "\n".join(chunks).strip()
+    except Exception as exc:
+        print(f"[attachment-xlsx] extract failed: {repr(exc)}")
+        return ""
+
+
+def extract_text_from_pptx_bytes(blob: bytes) -> str:
+    """Extract title + body text from each slide of a .pptx deck.
+    Bounded by ATTACHMENT_PPTX_MAX_SLIDES.
+
+    Returns empty string on any failure.
+    """
+    try:
+        from pptx import Presentation
+        from io import BytesIO
+        prs = Presentation(BytesIO(blob))
+        chunks: list[str] = []
+        slides = list(prs.slides)
+        for idx, slide in enumerate(slides):
+            if idx >= ATTACHMENT_PPTX_MAX_SLIDES:
+                chunks.append(f"[…meer slides overgeslagen ({len(slides) - idx})]")
+                break
+            slide_lines: list[str] = []
+            for shape in slide.shapes:
+                # has_text_frame attribute may be missing on some shapes
+                has_tf = getattr(shape, "has_text_frame", False)
+                if not has_tf:
+                    continue
+                tf = shape.text_frame
+                for para in tf.paragraphs:
+                    line = "".join((run.text or "") for run in para.runs).strip()
+                    if line:
+                        slide_lines.append(line)
+            # Speaker notes — often contain the actual narrative
+            try:
+                if slide.has_notes_slide:
+                    notes = slide.notes_slide.notes_text_frame.text or ""
+                    notes = notes.strip()
+                    if notes:
+                        slide_lines.append(f"[Notities] {notes}")
+            except Exception:
+                pass
+            if slide_lines:
+                chunks.append(f"### Slide {idx + 1}")
+                chunks.extend(slide_lines)
+                chunks.append("")
+        return "\n".join(chunks).strip()
+    except Exception as exc:
+        print(f"[attachment-pptx] extract failed: {repr(exc)}")
+        return ""
+
+
+def _decode_bytes_best_effort(blob: bytes) -> str:
+    """Try utf-8, then cp1252, then latin-1 (which always succeeds)."""
+    for encoding in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return blob.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return blob.decode("latin-1", errors="replace")
+
+
+def extract_text_from_csv_bytes(blob: bytes) -> str:
+    """Decode a CSV-ish text file and cap at ATTACHMENT_CSV_MAX_ROWS rows.
+    Auto-detects delimiter via csv.Sniffer.
+    """
+    try:
+        import csv as _csv
+        from io import StringIO
+        raw = _decode_bytes_best_effort(blob)
+        if not raw.strip():
+            return ""
+        # Sniff delimiter from a small sample (Excel-NL likes ; while
+        # tools-NL like ,). Fall back to comma.
+        sample = raw[:4096]
+        try:
+            dialect = _csv.Sniffer().sniff(sample, delimiters=",;\t|")
+        except Exception:
+            dialect = _csv.excel
+        rows: list[str] = []
+        reader = _csv.reader(StringIO(raw), dialect=dialect)
+        for idx, row in enumerate(reader):
+            if idx >= ATTACHMENT_CSV_MAX_ROWS:
+                rows.append("[…meer rijen overgeslagen]")
+                break
+            cells = [(c or "").strip() for c in row]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        return "\n".join(rows).strip()
+    except Exception as exc:
+        print(f"[attachment-csv] extract failed: {repr(exc)}")
+        return ""
+
+
+def extract_text_from_txt_bytes(blob: bytes) -> str:
+    """Decode plain-text files. Truncated globally by ATTACHMENT_MAX_TEXT_CHARS."""
+    try:
+        return _decode_bytes_best_effort(blob).strip()
+    except Exception as exc:
+        print(f"[attachment-txt] extract failed: {repr(exc)}")
+        return ""
+
+
 def extract_text_from_attachment(filename: str, mime_type: str, blob: bytes) -> tuple[str, str]:
-    """Returns (extracted_text, status). Status is 'success' or 'unsupported'."""
+    """Returns (extracted_text, status).
+    Status is 'success' (text was extracted), 'failed' (supported type but
+    extraction yielded nothing), or 'unsupported' (file type we don't handle).
+    """
     name_lower = (filename or "").lower()
     mt = (mime_type or "").lower()
+
+    # Match on mime type first; fall back to file extension because Gmail
+    # sometimes sends "application/octet-stream" for everything.
     if mt == "application/pdf" or name_lower.endswith(".pdf"):
         text = extract_text_from_pdf_bytes(blob)
         return text, ("success" if text else "failed")
+
     if (
         mt == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         or name_lower.endswith(".docx")
     ):
         text = extract_text_from_docx_bytes(blob)
         return text, ("success" if text else "failed")
+
+    if (
+        mt == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        or mt == "application/vnd.ms-excel.sheet.macroEnabled.12"
+        or name_lower.endswith(".xlsx")
+        or name_lower.endswith(".xlsm")
+    ):
+        text = extract_text_from_xlsx_bytes(blob)
+        return text, ("success" if text else "failed")
+
+    if (
+        mt == "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        or name_lower.endswith(".pptx")
+    ):
+        text = extract_text_from_pptx_bytes(blob)
+        return text, ("success" if text else "failed")
+
+    if mt == "text/csv" or name_lower.endswith(".csv"):
+        text = extract_text_from_csv_bytes(blob)
+        return text, ("success" if text else "failed")
+
+    if mt == "text/plain" or name_lower.endswith(".txt"):
+        text = extract_text_from_txt_bytes(blob)
+        return text, ("success" if text else "failed")
+
     return "", "unsupported"
 
 
