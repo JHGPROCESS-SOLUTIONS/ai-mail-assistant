@@ -367,6 +367,36 @@ def is_noreply_sender(sender_email: str | None) -> bool:
     return bool(_NOREPLY_LOCAL_PATTERNS.search(local))
 
 
+# OfficeFlow's own briefing / weekly recap / silence radar mails are sent
+# from the user's own mailbox to themselves. They always start with these
+# subject prefixes. We detect them so they always get the same label (FYI),
+# never get a draft reply, and don't burn classifier tokens.
+_OFFICEFLOW_BRIEFING_SUBJECT_PREFIXES = (
+    "officeflow briefing",
+    "officeflow weekrecap",
+    "officeflow weekly recap",
+    "officeflow —",   # daily summary "OfficeFlow — 15 min bespaard..."
+    "officeflow -",   # ASCII variant
+)
+
+
+def is_self_sent_officeflow_mail(
+    sender_email: str | None,
+    mailbox_email: str | None,
+    subject: str | None,
+) -> bool:
+    """True for mails OfficeFlow sends to the user's own inbox (briefings,
+    recaps, system summaries). Detected by from == mailbox_email AND subject
+    matching a known OfficeFlow prefix. We always classify these as FYI to
+    keep them out of Marketing / Notification / Priority noise."""
+    if not sender_email or not mailbox_email:
+        return False
+    if sender_email.strip().lower() != mailbox_email.strip().lower():
+        return False
+    subj = (subject or "").strip().lower()
+    return any(subj.startswith(p) for p in _OFFICEFLOW_BRIEFING_SUBJECT_PREFIXES)
+
+
 def normalize_subject_for_reply(subject: str | None) -> str:
     if not subject:
         return "Re:"
@@ -3006,8 +3036,26 @@ def detect_unsubscribe_request(subject: str | None, body_text: str | None) -> bo
     return False
 
 
-async def classify_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
+async def classify_email(
+    subject: str | None,
+    sender: str | None,
+    body_text: str | None,
+    mailbox_email: str | None = None,
+) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    # ============ EARLY OVERRIDE — OFFICEFLOW SELF-SENT MAILS ============
+    # Briefings, weekly recaps, silence-radar summaries that OfficeFlow sends
+    # from the user's mailbox to themselves are always FYI. Skip the OpenAI
+    # call entirely — saves tokens and guarantees consistent labelling.
+    sender_addr_for_self = extract_email_address(sender)
+    if is_self_sent_officeflow_mail(sender_addr_for_self, mailbox_email, subject):
+        return {
+            "label": "FYI",
+            "reason": "OfficeFlow self-sent briefing/recap mail — always FYI",
+            "confidence": "high",
+            "generate_draft": False,
+        }
 
     # Safeguard: lege body -> niet classificeren, FYI als veilig default
     if not body_text or len(body_text.strip()) < 10:
@@ -3187,8 +3235,23 @@ E-mail:
     }
 
 
-async def classify_follow_up_email(subject: str | None, sender: str | None, body_text: str | None) -> dict[str, Any]:
+async def classify_follow_up_email(
+    subject: str | None,
+    sender: str | None,
+    body_text: str | None,
+    mailbox_email: str | None = None,
+) -> dict[str, Any]:
     api_key = require_env(OPENAI_API_KEY, "OPENAI_API_KEY")
+
+    # Same self-sent OfficeFlow override as classify_email.
+    sender_addr_for_self = extract_email_address(sender)
+    if is_self_sent_officeflow_mail(sender_addr_for_self, mailbox_email, subject):
+        return {
+            "label": "FYI",
+            "reason": "OfficeFlow self-sent briefing/recap mail — always FYI",
+            "confidence": "high",
+            "generate_draft": False,
+        }
 
     # Safeguard: lege body -> niet classificeren, FYI als veilig default
     if not body_text or len(body_text.strip()) < 10:
@@ -4216,6 +4279,7 @@ async def process_inbox_for_user(
                 subject=latest_incoming_subject or subject,
                 sender=latest_incoming_from or from_header,
                 body_text=latest_incoming_body_text or body_text,
+                mailbox_email=mailbox_email,
             )
             target_label = classification["label"]
             classification_reason = classification["reason"]
@@ -4226,6 +4290,7 @@ async def process_inbox_for_user(
                 subject=subject,
                 sender=from_header,
                 body_text=body_text,
+                mailbox_email=mailbox_email,
             )
             target_label = classification["label"]
             classification_reason = classification["reason"]
