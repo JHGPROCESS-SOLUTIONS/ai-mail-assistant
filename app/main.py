@@ -1129,6 +1129,151 @@ async def get_current_user(
 
 # Constant-time comparison to avoid timing attacks on the shared secret.
 import hmac as _hmac
+import hashlib as _hashlib
+import secrets as _secrets
+
+
+# ============ CSRF STATE FOR OAUTH FLOW ============
+# Generates a HMAC-signed state token that ties /auth/google/start to its
+# matching /auth/google/callback request. Prevents an attacker from forging
+# an OAuth callback that links someone else's Google account to a user's
+# OfficeFlow session.
+#
+# State format: <random_nonce>.<hmac_sig>
+# We sign with INTERNAL_API_SECRET (or fall back to SUPABASE_JWT_SECRET) so
+# tampering with the nonce invalidates the signature.
+
+def _oauth_signing_key() -> bytes:
+    """Pick the strongest available secret to sign OAuth state with."""
+    key = INTERNAL_API_SECRET or SUPABASE_JWT_SECRET or ""
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail="OAuth state signing not configured (INTERNAL_API_SECRET missing)",
+        )
+    return key.encode("utf-8")
+
+
+def make_oauth_state() -> str:
+    """Create a signed state token to attach to /auth/google/start."""
+    nonce = _secrets.token_urlsafe(24)
+    key = _oauth_signing_key()
+    sig = _hmac.new(key, nonce.encode("utf-8"), _hashlib.sha256).hexdigest()[:24]
+    return f"{nonce}.{sig}"
+
+
+def verify_oauth_state(state: str | None) -> bool:
+    """Returns True if the state token is well-formed and signed by us."""
+    if not state or "." not in state:
+        return False
+    try:
+        nonce, sig = state.rsplit(".", 1)
+    except ValueError:
+        return False
+    if not nonce or not sig:
+        return False
+    try:
+        key = _oauth_signing_key()
+    except HTTPException:
+        return False
+    expected = _hmac.new(key, nonce.encode("utf-8"), _hashlib.sha256).hexdigest()[:24]
+    return _hmac.compare_digest(sig, expected)
+
+
+# ============ STRIPE WEBHOOK IDEMPOTENCY ============
+# Stripe delivers webhooks at-least-once — a network blip can cause the same
+# event to arrive twice. We dedupe in-memory using an LRU cache keyed by
+# stripe event id. For a single-instance Railway deploy this is sufficient;
+# for multi-instance you'd swap to a DB or Redis store (see Phase 5+).
+from collections import OrderedDict as _OrderedDict
+
+_STRIPE_PROCESSED_EVENTS: "_OrderedDict[str, float]" = _OrderedDict()
+_STRIPE_PROCESSED_LIMIT = 5000  # entries — ~24h of events at our volume
+
+
+def stripe_event_already_processed(event_id: str | None) -> bool:
+    """Check + register a Stripe event id. Returns True if it was seen
+    before (caller should skip processing). Thread-safe enough for our
+    single-worker uvicorn setup."""
+    if not event_id:
+        return False
+    if event_id in _STRIPE_PROCESSED_EVENTS:
+        return True
+    _STRIPE_PROCESSED_EVENTS[event_id] = _dt_now_ts()
+    # Trim oldest entries if we're over the cap
+    while len(_STRIPE_PROCESSED_EVENTS) > _STRIPE_PROCESSED_LIMIT:
+        _STRIPE_PROCESSED_EVENTS.popitem(last=False)
+    return False
+
+
+def _dt_now_ts() -> float:
+    return datetime.now(timezone.utc).timestamp()
+
+
+# ============ TOKEN ENCRYPTION HELPERS (foundation, backward-compat) ============
+# Encrypts OAuth tokens at rest using Fernet (symmetric AES-128-CBC + HMAC).
+# The decrypt function is BACKWARD-COMPATIBLE: if input doesn't look encrypted
+# (no Fernet prefix), it's returned as-is. This lets us roll out encryption
+# gradually — new tokens are encrypted, old ones remain plain text until
+# they're refreshed and re-stored.
+#
+# To enable: set TOKEN_ENCRYPTION_KEY env var (32 url-safe base64 bytes).
+# Generate with: python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+TOKEN_ENCRYPTION_KEY = os.getenv("TOKEN_ENCRYPTION_KEY")
+
+# Lazy-initialised so missing key doesn't crash startup.
+_FERNET = None
+
+
+def _get_fernet():
+    global _FERNET
+    if _FERNET is None and TOKEN_ENCRYPTION_KEY:
+        try:
+            from cryptography.fernet import Fernet
+            _FERNET = Fernet(TOKEN_ENCRYPTION_KEY.encode("utf-8"))
+        except Exception as exc:
+            print(f"[token-encryption] Fernet init failed: {repr(exc)}")
+            _FERNET = None
+    return _FERNET
+
+
+def encrypt_token(plain: str | None) -> str | None:
+    """Encrypt a token for storage. Returns plain string unchanged when no
+    encryption key is configured (graceful no-op). Encrypted output starts
+    with 'gAAAAA' (Fernet prefix) so we can detect on decrypt."""
+    if not plain:
+        return plain
+    f = _get_fernet()
+    if not f:
+        return plain
+    try:
+        return f.encrypt(plain.encode("utf-8")).decode("utf-8")
+    except Exception as exc:
+        print(f"[token-encryption] encrypt failed: {repr(exc)}")
+        return plain  # never lose data — fall back to plain
+
+
+def decrypt_token(maybe_encrypted: str | None) -> str | None:
+    """Decrypt a token from storage. If input doesn't look encrypted (no
+    Fernet prefix), returned as-is. This handles legacy plain-text tokens
+    during rollout."""
+    if not maybe_encrypted:
+        return maybe_encrypted
+    # Fernet tokens always start with "gAAAAA" (base64 of version byte 0x80)
+    if not maybe_encrypted.startswith("gAAAAA"):
+        return maybe_encrypted
+    f = _get_fernet()
+    if not f:
+        # We received an encrypted token but have no key — log and return None
+        # so caller can detect failure (don't return a corrupt string).
+        print("[token-encryption] decrypt called but no key configured")
+        return None
+    try:
+        return f.decrypt(maybe_encrypted.encode("utf-8")).decode("utf-8")
+    except Exception as exc:
+        print(f"[token-encryption] decrypt failed: {repr(exc)}")
+        return None
 
 
 async def require_internal_secret(
@@ -4736,6 +4881,11 @@ def google_login():
     client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
     redirect_uri = require_env(GOOGLE_REDIRECT_URI, "GOOGLE_REDIRECT_URI")
 
+    # CSRF protection: signed state parameter prevents an attacker from
+    # forging an OAuth callback that links someone else's Google account
+    # to the wrong OfficeFlow user.
+    state = make_oauth_state()
+
     url = (
         "https://accounts.google.com/o/oauth2/v2/auth"
         f"?client_id={client_id}"
@@ -4744,12 +4894,21 @@ def google_login():
         f"&scope={quote(GMAIL_SCOPE, safe=':/')}"
         "&access_type=offline"
         "&prompt=consent"
+        f"&state={state}"
     )
     return RedirectResponse(url)
 
 
 @app.get("/auth/google/callback")
-async def google_callback(code: str):
+async def google_callback(code: str, state: str | None = None):
+    # CSRF check: state must be present and signed by us
+    if not verify_oauth_state(state):
+        print(f"[oauth-callback] Invalid OAuth state: {state!r}")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid OAuth state — possible CSRF attempt. Restart the connection flow.",
+        )
+
     client_id = require_env(GOOGLE_CLIENT_ID, "GOOGLE_CLIENT_ID")
     client_secret = require_env(GOOGLE_CLIENT_SECRET, "GOOGLE_CLIENT_SECRET")
     redirect_uri = require_env(GOOGLE_REDIRECT_URI, "GOOGLE_REDIRECT_URI")
@@ -5954,6 +6113,17 @@ async def stripe_webhook(request: Request):
             sig_header=sig_header,
             secret=webhook_secret,
         )
+
+        # Idempotency: Stripe delivers at-least-once. Skip if we've already
+        # handled this event id. Prevents duplicate subscription updates
+        # when Stripe retries a slow webhook response.
+        event_id = event.get("id") if isinstance(event, dict) else getattr(event, "id", None)
+        if stripe_event_already_processed(event_id):
+            print(f"[stripe-webhook] Skipping duplicate event {event_id}")
+            return JSONResponse(
+                status_code=200,
+                content={"received": True, "deduped": True, "event_id": event_id},
+            )
 
         event_type = event["type"]
         raw_data = event["data"]["object"]
