@@ -1210,6 +1210,74 @@ def _dt_now_ts() -> float:
     return datetime.now(timezone.utc).timestamp()
 
 
+async def supabase_record_webhook_event(
+    stripe_event_id: str,
+    event_type: str | None,
+    livemode: bool | None,
+) -> bool:
+    """Atomically claim a Stripe event for processing. Returns True if this
+    is the first time we see the event (caller should process it), False if
+    it was already received (caller should skip — it's a duplicate).
+
+    Uses the unique constraint on webhook_events.stripe_event_id for
+    persistent dedup that survives backend restarts and works across
+    multiple Railway instances. Falls back to in-memory cache if DB call
+    fails (best-effort)."""
+    if not stripe_event_id:
+        return True  # no id = can't dedup, let it through
+
+    payload = {
+        "stripe_event_id": stripe_event_id,
+        "event_type": event_type,
+        "livemode": livemode,
+        "processing_status": "pending",
+    }
+    try:
+        result = await supabase_post(
+            "/rest/v1/webhook_events",
+            [payload],
+            prefer="return=minimal",
+        )
+        # If insert succeeded, this is a new event
+        return True
+    except HTTPException as exc:
+        detail = str(exc.detail) if exc.detail else ""
+        if "23505" in detail or "duplicate key" in detail.lower():
+            # Unique violation = already processed
+            return False
+        # Other DB error — log + fall through to in-memory cache
+        print(f"[webhook-events-db] insert failed: {repr(exc)}")
+        return True
+    except Exception as exc:
+        print(f"[webhook-events-db] unexpected error: {repr(exc)}")
+        return True
+
+
+async def supabase_mark_webhook_event_processed(
+    stripe_event_id: str,
+    success: bool,
+    error_message: str | None = None,
+) -> None:
+    """Update the webhook_events row after processing. Best-effort — failure
+    here doesn't break the webhook response (it just leaves the row in
+    'pending' status and we'd manually clean it up if it ever matters)."""
+    if not stripe_event_id:
+        return
+    payload: dict[str, Any] = {
+        "processing_status": "processed" if success else "failed",
+        "processed_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if error_message:
+        payload["error_message"] = error_message[:500]
+    try:
+        await supabase_patch(
+            f"/rest/v1/webhook_events?stripe_event_id=eq.{quote(stripe_event_id, safe='')}",
+            payload,
+        )
+    except Exception as exc:
+        print(f"[webhook-events-db] update failed for {stripe_event_id}: {repr(exc)}")
+
+
 # ============ TOKEN ENCRYPTION HELPERS (foundation, backward-compat) ============
 # Encrypts OAuth tokens at rest using Fernet (symmetric AES-128-CBC + HMAC).
 # The decrypt function is BACKWARD-COMPATIBLE: if input doesn't look encrypted
@@ -1738,19 +1806,33 @@ async def supabase_insert_draft(
     if isinstance(confidence, str) and confidence in ("high", "medium", "low"):
         safe_confidence = confidence
 
-    data = await supabase_post(
-        "/rest/v1/drafts",
-        [{
-            "user_id": user_id,
-            "email_id": email_id,
-            "gmail_draft_id": gmail_draft_id,
-            "subject": subject,
-            "draft_body": draft_body,
-            "status": status,
-            "confidence": safe_confidence,
-        }],
-    )
-    return data[0] if isinstance(data, list) and data else data
+    try:
+        data = await supabase_post(
+            "/rest/v1/drafts",
+            [{
+                "user_id": user_id,
+                "email_id": email_id,
+                "gmail_draft_id": gmail_draft_id,
+                "subject": subject,
+                "draft_body": draft_body,
+                "status": status,
+                "confidence": safe_confidence,
+            }],
+        )
+        return data[0] if isinstance(data, list) and data else data
+    except HTTPException as exc:
+        # Catch the unique-index violation from drafts_one_active_per_email_idx.
+        # This means a concurrent process_inbox_for_user run already created
+        # a draft for this email — log it and return None so the caller
+        # treats it as "draft already exists, skip".
+        detail = str(exc.detail) if exc.detail else ""
+        if "23505" in detail or "duplicate key" in detail.lower():
+            print(
+                f"[draft-race] Concurrent draft already exists for email_id={email_id} "
+                f"(user {user_id}) — skipping duplicate insert"
+            )
+            return None
+        raise
 
 
 async def supabase_upsert_gmail_label(
@@ -6114,18 +6196,36 @@ async def stripe_webhook(request: Request):
             secret=webhook_secret,
         )
 
-        # Idempotency: Stripe delivers at-least-once. Skip if we've already
-        # handled this event id. Prevents duplicate subscription updates
-        # when Stripe retries a slow webhook response.
+        # Idempotency: Stripe delivers at-least-once. Two-layer dedup:
+        #   1. In-memory cache (fastest, survives within one process)
+        #   2. webhook_events DB table (survives restarts + multi-instance)
+        # The DB layer is authoritative — if it says "already processed",
+        # we skip even if the in-memory cache hasn't seen it yet.
         event_id = event.get("id") if isinstance(event, dict) else getattr(event, "id", None)
+        event_type = event["type"]
+        event_livemode = event.get("livemode") if isinstance(event, dict) else None
+
+        # Fast path: in-memory check
         if stripe_event_already_processed(event_id):
-            print(f"[stripe-webhook] Skipping duplicate event {event_id}")
+            print(f"[stripe-webhook] Skipping duplicate event {event_id} (in-memory)")
             return JSONResponse(
                 status_code=200,
-                content={"received": True, "deduped": True, "event_id": event_id},
+                content={"received": True, "deduped": True, "source": "memory"},
             )
 
-        event_type = event["type"]
+        # Authoritative path: DB-backed claim
+        is_new = await supabase_record_webhook_event(
+            stripe_event_id=event_id or "",
+            event_type=event_type,
+            livemode=event_livemode,
+        )
+        if not is_new:
+            print(f"[stripe-webhook] Skipping duplicate event {event_id} (DB)")
+            return JSONResponse(
+                status_code=200,
+                content={"received": True, "deduped": True, "source": "db"},
+            )
+
         raw_data = event["data"]["object"]
 
         # Convert Stripe StripeObject → pure Python dict (JSON roundtrip)
@@ -6286,6 +6386,13 @@ async def stripe_webhook(request: Request):
                             status="canceled",
                         )
 
+        # Mark webhook event as successfully processed
+        if event_id:
+            await supabase_mark_webhook_event_processed(
+                stripe_event_id=event_id,
+                success=True,
+            )
+
         return {"received": True}
 
     except stripe.error.SignatureVerificationError:
@@ -6293,6 +6400,16 @@ async def stripe_webhook(request: Request):
     except ValueError:
         return JSONResponse(status_code=400, content={"error": "Invalid Stripe payload"})
     except Exception as exc:
+        # Mark event as failed so we can investigate later. Best-effort.
+        try:
+            if 'event_id' in locals() and event_id:
+                await supabase_mark_webhook_event_processed(
+                    stripe_event_id=event_id,
+                    success=False,
+                    error_message=f"{type(exc).__name__}: {str(exc)[:300]}",
+                )
+        except Exception:
+            pass
         return JSONResponse(status_code=500, content={"error": f"Webhook handler failed: {str(exc)}"})
 
 # =========================================================================
