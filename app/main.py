@@ -3458,6 +3458,70 @@ def extract_text_from_attachment(filename: str, mime_type: str, blob: bytes) -> 
     return "", "unsupported"
 
 
+async def _openai_chat_call_with_retry(
+    api_key: str,
+    payload: dict[str, Any],
+    *,
+    timeout_seconds: float = 60.0,
+    max_retries: int = 1,
+    backoff_seconds: float = 5.0,
+) -> httpx.Response:
+    """Call OpenAI chat-completions with one retry on transient failures.
+
+    Retries on:
+      - network errors (timeout, connection drop)
+      - HTTP 5xx (OpenAI server-side hiccup)
+      - HTTP 429 (rate-limited; brief sleep then retry once)
+
+    Does NOT retry on other 4xx — auth/payload issues won't fix themselves
+    and a retry would just delay the user-facing error. Returns the raw
+    response so the caller can keep its existing parse / status-check logic.
+
+    Used for user-facing endpoints (live UI calls) where one transient
+    flake should not surface as a 500. Background loops typically don't
+    need this — they retry on the next cycle.
+    """
+    last_exc: Exception | None = None
+    last_response: httpx.Response | None = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+                response = await client.post(
+                    "https://api.openai.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+            # Success or non-retryable 4xx — return immediately
+            if response.status_code < 500 and response.status_code != 429:
+                return response
+            last_response = response
+            print(
+                f"[openai-retry] attempt {attempt + 1}/{max_retries + 1} "
+                f"got HTTP {response.status_code}; "
+                f"backoff {backoff_seconds}s before retry"
+            )
+        except (httpx.TimeoutException, httpx.RequestError) as exc:
+            last_exc = exc
+            print(
+                f"[openai-retry] attempt {attempt + 1}/{max_retries + 1} "
+                f"network error: {repr(exc)}; backoff {backoff_seconds}s before retry"
+            )
+
+        if attempt < max_retries:
+            await asyncio.sleep(backoff_seconds)
+
+    # All retries exhausted
+    if last_response is not None:
+        return last_response
+    if last_exc is not None:
+        raise last_exc
+    raise RuntimeError("OpenAI call failed without producing a response")
+
+
 async def summarize_attachment_text(filename: str, text: str) -> dict[str, Any]:
     """Send extracted text to OpenAI and ask for a summary + structured data.
     Returns {summary: str, key_data: dict} — never raises; falls back to
@@ -4773,28 +4837,17 @@ Originele e-mail:
         "Je output bevat alleen de uiteindelijke mailtekst."
     )
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "gpt-4o-mini",
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": system_message,
-                    },
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    },
-                ],
-                "temperature": 0.2,
-            },
-        )
+    response = await _openai_chat_call_with_retry(
+        api_key=api_key,
+        payload={
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.2,
+        },
+    )
 
     data = parse_response_data(response)
     if response.status_code >= 400:
@@ -7109,20 +7162,16 @@ async def public_chat(body: _ChatBody, request: Request):
     msgs.append({"role": "user", "content": user_message})
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            res = await client.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": msgs,
-                    "max_tokens": 300,
-                    "temperature": 0.4,
-                },
-            )
+        res = await _openai_chat_call_with_retry(
+            api_key=api_key,
+            payload={
+                "model": "gpt-4o-mini",
+                "messages": msgs,
+                "max_tokens": 300,
+                "temperature": 0.4,
+            },
+            timeout_seconds=30.0,
+        )
         data = res.json()
         if res.status_code >= 400:
             print(f"[chatbot] OpenAI error: {data}")
