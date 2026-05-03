@@ -7905,11 +7905,19 @@ def build_briefing_html(
     else:
         subject = f"OfficeFlow Briefing — {today_str} · {total_action} mails vragen aandacht"
 
-    # Gmail deep links — use /u/0/ path so URL matches existing Gmail tab
-    # (query strings like ?authuser=... force a fresh page load in a new tab;
-    # hash-only routes under /u/0/ navigate inside the already-open Gmail app).
+    # Gmail deep links — pin to the OfficeFlow-connected mailbox via
+    # ?authuser=<email>. Without this query param Gmail picks the first
+    # account in the user's browser, which can be a totally different
+    # mailbox than the one the briefing is about (multi-tenancy bug).
+    # A fresh page load is acceptable cost for routing the user to the
+    # correct inbox.
     from urllib.parse import quote as _urlquote
-    gmail_base = "https://mail.google.com/mail/u/0/"
+    auth_qs = (
+        f"?authuser={_urlquote(user_email, safe='')}"
+        if user_email
+        else ""
+    )
+    gmail_base = f"https://mail.google.com/mail/u/0/{auth_qs}"
 
     def label_url(label_name: str) -> str:
         return f"{gmail_base}#label/{_urlquote(label_name.replace(' ', '+'), safe='+')}"
