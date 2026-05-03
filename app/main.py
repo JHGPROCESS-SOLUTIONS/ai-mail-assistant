@@ -2341,6 +2341,40 @@ async def refresh_google_access_token(user_id: str, refresh_token: str) -> str:
     return new_access_token
 
 
+async def _mark_mailbox_needs_reconnect_safe(user_id: str, reason: str) -> None:
+    """Idempotently mark a Gmail mailbox as `needs_reconnect`.
+
+    Called when a Gmail API call returns 401/403 even AFTER a token refresh —
+    indicates the user revoked the gmail.modify scope while keeping the
+    account/refresh-token alive, OR Google rotated permissions. The
+    `invalid_grant` path in refresh_google_access_token() already handles
+    fully-revoked refresh tokens; this helper covers everything else.
+
+    Idempotent: skips the update if mailbox is already needs_reconnect, so
+    a tight error loop won't spam Supabase.
+    """
+    try:
+        mailbox = await supabase_get_mailbox_by_user_id(
+            user_id=user_id, provider="gmail",
+        )
+        if not mailbox:
+            return
+        if mailbox.get("status") == "needs_reconnect":
+            return
+        await supabase_update_mailbox_status(
+            mailbox_id=mailbox["id"],
+            status="needs_reconnect",
+        )
+        print(
+            f"[mailbox-revoked] Marked mailbox {mailbox.get('email_address')} "
+            f"(user {user_id}) as needs_reconnect — {reason}"
+        )
+    except Exception as exc:
+        # Best-effort — never let mailbox-status update mask the real error
+        # the caller will raise next.
+        print(f"[mailbox-revoked] Failed to flag mailbox for user {user_id}: {repr(exc)}")
+
+
 async def gmail_get_json_for_user(user_id: str, url: str, params: dict[str, Any] | None = None) -> Any:
     oauth = await supabase_get_oauth_account(user_id=user_id, provider="google")
     if not oauth:
@@ -2367,6 +2401,11 @@ async def gmail_get_json_for_user(user_id: str, url: str, params: dict[str, Any]
             )
 
     data = parse_response_data(response)
+    if response.status_code in (401, 403):
+        await _mark_mailbox_needs_reconnect_safe(
+            user_id=user_id,
+            reason=f"GET {response.status_code} after refresh",
+        )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
     return data
@@ -2404,6 +2443,11 @@ async def gmail_post_json_for_user(user_id: str, url: str, payload: dict[str, An
             )
 
     data = parse_response_data(response)
+    if response.status_code in (401, 403):
+        await _mark_mailbox_needs_reconnect_safe(
+            user_id=user_id,
+            reason=f"POST {response.status_code} after refresh",
+        )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
     return data
@@ -2441,6 +2485,11 @@ async def gmail_patch_json_for_user(user_id: str, url: str, payload: dict[str, A
             )
 
     data = parse_response_data(response)
+    if response.status_code in (401, 403):
+        await _mark_mailbox_needs_reconnect_safe(
+            user_id=user_id,
+            reason=f"PATCH {response.status_code} after refresh",
+        )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
     return data
@@ -2473,6 +2522,11 @@ async def gmail_delete_for_user(user_id: str, url: str) -> Any:
         return {"status": "not_found"}
 
     data = parse_response_data(response)
+    if response.status_code in (401, 403):
+        await _mark_mailbox_needs_reconnect_safe(
+            user_id=user_id,
+            reason=f"DELETE {response.status_code} after refresh",
+        )
     if response.status_code >= 400:
         raise HTTPException(status_code=response.status_code, detail=f"Gmail API error: {data}")
     return data or {"status": "deleted"}
